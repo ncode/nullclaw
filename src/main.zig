@@ -1054,7 +1054,7 @@ fn runWorkspace(allocator: std.mem.Allocator, sub_args: []const []const u8) !voi
     }
 }
 
-fn runWorkspaceEdit(_: std.mem.Allocator, args: []const []const u8, cfg: yc.config.Config) void {
+fn runWorkspaceEdit(allocator: std.mem.Allocator, args: []const []const u8, cfg: yc.config.Config) void {
     if (args.len < 1) {
         std.debug.print("Usage: nullclaw workspace edit <filename>\n\n", .{});
         std.debug.print("Bootstrap files: SOUL.md, AGENTS.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md\n", .{});
@@ -1079,16 +1079,21 @@ fn runWorkspaceEdit(_: std.mem.Allocator, args: []const []const u8, cfg: yc.conf
         std.process.exit(1);
     }
 
-    const filepath = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ cfg.workspace_dir, filename }) catch {
+    const filepath = std.fmt.allocPrint(allocator, "{s}/{s}", .{ cfg.workspace_dir, filename }) catch {
         std.debug.print("Failed to build file path\n", .{});
         std.process.exit(1);
     };
-    defer std.heap.page_allocator.free(filepath);
+    defer allocator.free(filepath);
 
     // Determine editor: $VISUAL, $EDITOR, fallback to vi
-    const editor = std.posix.getenv("VISUAL") orelse std.posix.getenv("EDITOR") orelse "vi";
+    var editor_owned = getEnvVarOwnedOrNull(allocator, "VISUAL");
+    if (editor_owned == null) {
+        editor_owned = getEnvVarOwnedOrNull(allocator, "EDITOR");
+    }
+    defer if (editor_owned) |value| allocator.free(value);
+    const editor = if (editor_owned) |value| value else "vi";
 
-    var child = std.process.Child.init(&.{ editor, filepath }, std.heap.page_allocator);
+    var child = std.process.Child.init(&.{ editor, filepath }, allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
@@ -1096,6 +1101,13 @@ fn runWorkspaceEdit(_: std.mem.Allocator, args: []const []const u8, cfg: yc.conf
     _ = child.spawnAndWait() catch |err| {
         std.debug.print("Failed to launch editor '{s}': {s}\n", .{ editor, @errorName(err) });
         std.process.exit(1);
+    };
+}
+
+fn getEnvVarOwnedOrNull(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
+    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => null,
     };
 }
 
