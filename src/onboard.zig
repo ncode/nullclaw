@@ -1504,7 +1504,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         if (provider_idx < known_providers.len and std.mem.eql(u8, known_providers[provider_idx].key, "azure")) {
             // Prompt for Azure endpoint
             var azure_endpoint_buf: [512]u8 = undefined;
-            try out.writeAll("  Azure OpenAI endpoint (e.g., https://yourresource.openai.azure.com): ");
+            try out.writeAll("  Azure OpenAI endpoint (e.g., https://your-resource.openai.azure.com): ");
             const azure_endpoint = prompt(out, &azure_endpoint_buf, "", "") orelse {
                 try out.writeAll("\n  Aborted.\n");
                 try out.flush();
