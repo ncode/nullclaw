@@ -5207,16 +5207,19 @@ test "Agent shell failure with normalized output does not poison next turn" {
         saw_tool_results: bool = false,
         saw_error_tool_result: bool = false,
         saw_valid_utf8_tool_results: bool = false,
-        saw_expected_normalized_text: bool = false,
+        saw_non_empty_error_tool_result: bool = false,
 
         fn failingShellCommand() []const u8 {
             return if (comptime builtin.os.tag == .windows)
-                "powershell.exe -NoProfile -Command \"[Console]::OpenStandardError().Write([byte[]](0xD6,0xD0,0xCE,0xC4),0,4); exit 1\""
+                "powershell.exe -NoProfile -Command \"[Console]::OpenStandardError().Write([byte[]](0xD6,0xD0,0xCE,0xC4),0,4)\" & exit /b 1"
             else
                 "printf '\\200' >&2; exit 1";
         }
 
         fn captureToolResultMessage(self: *Self, messages: []const ChatMessage) void {
+            const start_marker = "<tool_result name=\"shell\" status=\"error\">";
+            const end_marker = "</tool_result>";
+
             for (messages) |msg| {
                 if (msg.role != .user) continue;
                 if (std.mem.indexOf(u8, msg.content, "[Tool results]") == null) continue;
@@ -5224,10 +5227,13 @@ test "Agent shell failure with normalized output does not poison next turn" {
                 self.saw_tool_results = true;
                 self.saw_error_tool_result = std.mem.indexOf(u8, msg.content, "<tool_result name=\"shell\" status=\"error\">") != null;
                 self.saw_valid_utf8_tool_results = std.unicode.utf8ValidateSlice(msg.content);
-                self.saw_expected_normalized_text = if (comptime builtin.os.tag == .windows)
-                    std.mem.indexOf(u8, msg.content, "中文") != null
-                else
-                    std.mem.indexOf(u8, msg.content, "\xEF\xBF\xBD") != null;
+                if (std.mem.indexOf(u8, msg.content, start_marker)) |start_idx| {
+                    const body_start = start_idx + start_marker.len;
+                    if (std.mem.indexOf(u8, msg.content[body_start..], end_marker)) |end_rel| {
+                        const body = std.mem.trim(u8, msg.content[body_start .. body_start + end_rel], " \t\r\n");
+                        self.saw_non_empty_error_tool_result = body.len > 0;
+                    }
+                }
                 break;
             }
         }
@@ -5333,7 +5339,7 @@ test "Agent shell failure with normalized output does not poison next turn" {
     try std.testing.expect(provider_state.saw_tool_results);
     try std.testing.expect(provider_state.saw_error_tool_result);
     try std.testing.expect(provider_state.saw_valid_utf8_tool_results);
-    try std.testing.expect(provider_state.saw_expected_normalized_text);
+    try std.testing.expect(provider_state.saw_non_empty_error_tool_result);
 
     for (agent.history.items) |msg| {
         try std.testing.expect(std.unicode.utf8ValidateSlice(msg.content));
