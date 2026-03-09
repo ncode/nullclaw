@@ -27,7 +27,6 @@ const BINARY_SIGNATURES: []const BinarySignature = &.{
     .{ .magic = "7z\xBC\xAF\x27\x1C", .type_name = "7z archive" },
     .{ .magic = "MZ", .type_name = "Windows executable" },
     .{ .magic = "\x7FELF", .type_name = "Linux executable" },
-    .{ .magic = "RIFF", .type_name = "WebP image" },
 };
 
 /// Extension to type name mapping (fallback when magic number not detected)
@@ -48,14 +47,25 @@ const EXTENSION_TYPES: []const struct { []const u8, []const u8 } = &.{
     .{ ".dylib", "macOS shared library" },
 };
 
+fn isWebP(data: []const u8) bool {
+    return data.len >= 12 and
+        std.mem.eql(u8, data[0..4], "RIFF") and
+        std.mem.eql(u8, data[8..12], "WEBP");
+}
+
+fn isMp4(data: []const u8) bool {
+    return data.len >= 8 and std.mem.eql(u8, data[4..8], "ftyp");
+}
+
 fn isBinaryContent(data: []const u8) bool {
-    if (data.len < 2) return false;
+    if (data.len == 0) return false;
 
     for (BINARY_SIGNATURES) |sig| {
         if (std.mem.startsWith(u8, data, sig.magic)) return true;
     }
 
-    if (data.len >= 12 and std.mem.indexOf(u8, data[4..12], "ftyp") != null) return true;
+    if (isWebP(data)) return true;
+    if (isMp4(data)) return true;
 
     const check_len = @min(data.len, 8192);
     for (data[0..check_len]) |byte| {
@@ -70,7 +80,8 @@ fn getBinaryFileType(data: []const u8, path: []const u8) []const u8 {
         if (std.mem.startsWith(u8, data, sig.magic)) return sig.type_name;
     }
 
-    if (data.len >= 12 and std.mem.indexOf(u8, data[4..12], "ftyp") != null) return "MP4 video";
+    if (isWebP(data)) return "WebP image";
+    if (isMp4(data)) return "MP4 video";
 
     const ext = std.fs.path.extension(path);
     for (EXTENSION_TYPES) |entry| {
@@ -158,6 +169,7 @@ pub const FileReadTool = struct {
             const msg = try std.fmt.allocPrint(allocator, "Failed to read file: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };
+        errdefer allocator.free(contents);
 
         // Check if content is binary
         if (isBinaryContent(contents)) {
@@ -358,4 +370,74 @@ test "file_read absolute path with allowed_paths works" {
 
     try std.testing.expect(result.success);
     try std.testing.expectEqualStrings("allowed content", result.output);
+}
+
+test "file_read reports PNG files as binary" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const png_data = [_]u8{ 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+    try tmp_dir.dir.writeFile(.{ .sub_path = "image.png", .data = &png_data });
+
+    const ws_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+
+    var ft = FileReadTool{ .workspace_dir = ws_path };
+    const parsed = try root.parseTestArgs("{\"path\": \"image.png\"}");
+    defer parsed.deinit();
+    const result = try ft.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "PNG image") != null);
+}
+
+test "file_read reports WAV files as WAV instead of WebP" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const wav_data = [_]u8{
+        'R', 'I', 'F', 'F', 0x24, 0x00, 0x00, 0x00,
+        'W', 'A', 'V', 'E', 'f',  'm',  't',  ' ',
+    };
+    try tmp_dir.dir.writeFile(.{ .sub_path = "sound.wav", .data = &wav_data });
+
+    const ws_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+
+    var ft = FileReadTool{ .workspace_dir = ws_path };
+    const parsed = try root.parseTestArgs("{\"path\": \"sound.wav\"}");
+    defer parsed.deinit();
+    const result = try ft.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "WAV audio") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "WebP image") == null);
+}
+
+test "file_read reports WebP files as WebP" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const webp_data = [_]u8{
+        'R', 'I', 'F', 'F', 0x1A, 0x00, 0x00, 0x00,
+        'W', 'E', 'B', 'P', 'V',  'P',  '8',  ' ',
+    };
+    try tmp_dir.dir.writeFile(.{ .sub_path = "image.webp", .data = &webp_data });
+
+    const ws_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+
+    var ft = FileReadTool{ .workspace_dir = ws_path };
+    const parsed = try root.parseTestArgs("{\"path\": \"image.webp\"}");
+    defer parsed.deinit();
+    const result = try ft.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "WebP image") != null);
 }
