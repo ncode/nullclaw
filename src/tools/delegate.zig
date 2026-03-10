@@ -82,19 +82,17 @@ pub const DelegateTool = struct {
 
         // Determine system prompt, API key, provider, model from agent config or defaults
         if (agent_cfg) |ac| {
-            // Use agent-specific config via completeWithSystem
             const api_key = ac.api_key orelse self.fallback_api_key;
             const sys_prompt = ac.system_prompt orelse "You are a helpful assistant. Respond concisely.";
-
-            const cfg = .{
-                .api_key = api_key,
-                .default_provider = ac.provider,
-                .default_model = @as(?[]const u8, ac.model),
-                .temperature = ac.temperature orelse @as(f64, 0.7),
-                .max_tokens = @as(?u64, null),
-            };
-
-            const response = providers.completeWithSystem(allocator, &cfg, sys_prompt, full_prompt) catch |err| {
+            const response = completeAgentPrompt(
+                allocator,
+                ac.provider,
+                api_key,
+                ac.model,
+                sys_prompt,
+                full_prompt,
+                ac.temperature orelse @as(f64, 0.7),
+            ) catch |err| {
                 const msg = std.fmt.allocPrint(
                     allocator,
                     "Delegation to agent '{s}' failed: {s}",
@@ -137,9 +135,79 @@ pub const DelegateTool = struct {
         }
         return null;
     }
+
+    fn completeAgentPrompt(
+        allocator: std.mem.Allocator,
+        provider_name: []const u8,
+        api_key: ?[]const u8,
+        model: []const u8,
+        system_prompt: []const u8,
+        prompt: []const u8,
+        temperature: f64,
+    ) ![]const u8 {
+        var provider_holder = providers.ProviderHolder.fromConfig(
+            allocator,
+            provider_name,
+            api_key,
+            null,
+            true,
+            null,
+        );
+        defer provider_holder.deinit();
+        return provider_holder.provider().chatWithSystem(
+            allocator,
+            system_prompt,
+            prompt,
+            model,
+            temperature,
+        );
+    }
 };
 
 // ── Tests ───────────────────────────────────────────────────────────
+
+const TestChatServer = struct {
+    port: u16,
+    thread: std.Thread,
+
+    fn start(response_text: []const u8) !TestChatServer {
+        const addr = try std.net.Address.resolveIp("127.0.0.1", 0);
+        var server = try addr.listen(.{ .reuse_address = true });
+        const port = server.listen_address.getPort();
+        const thread = try std.Thread.spawn(.{}, serveOnce, .{ server, response_text });
+        return .{ .port = port, .thread = thread };
+    }
+
+    fn join(self: *TestChatServer) void {
+        self.thread.join();
+    }
+
+    fn serveOnce(server: std.net.Server, response_text: []const u8) !void {
+        var srv = server;
+        defer srv.deinit();
+
+        var conn = try srv.accept();
+        defer conn.stream.close();
+
+        var buf: [4096]u8 = undefined;
+        _ = try conn.stream.read(&buf);
+
+        var body_buf: [512]u8 = undefined;
+        const body = try std.fmt.bufPrint(
+            &body_buf,
+            "{{\"choices\":[{{\"message\":{{\"content\":\"{s}\"}}}}]}}",
+            .{response_text},
+        );
+
+        var resp_buf: [1024]u8 = undefined;
+        const resp = try std.fmt.bufPrint(
+            &resp_buf,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+            .{ body.len, body },
+        );
+        try conn.stream.writeAll(resp);
+    }
+};
 
 test "delegate tool name" {
     var dt = DelegateTool{};
@@ -375,4 +443,53 @@ test "delegate agents config stored" {
     try std.testing.expectEqualStrings("sk-test", dt.fallback_api_key.?);
     try std.testing.expectEqual(@as(u32, 1), dt.depth);
     _ = dt.tool(); // ensure tool() works
+}
+
+test "delegate uses parsed agent model.primary provider ref" {
+    const allocator = std.testing.allocator;
+
+    var server = try TestChatServer.start("delegate-ok");
+    defer server.join();
+
+    const json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"agents\":{{\"list\":[{{\"id\":\"coder\",\"model\":{{\"primary\":\"custom:http://127.0.0.1:{d}/v1/mock-model\"}},\"system_prompt\":\"You are a coder.\"}}]}}}}",
+        .{server.port},
+    );
+    defer allocator.free(json);
+
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = allocator,
+    };
+    try cfg.parseJson(json);
+    defer {
+        if (cfg.agents.len > 0) {
+            allocator.free(cfg.agents[0].name);
+            allocator.free(cfg.agents[0].provider);
+            allocator.free(cfg.agents[0].model);
+            if (cfg.agents[0].system_prompt) |sp| allocator.free(sp);
+            allocator.free(cfg.agents);
+        }
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.agents.len);
+    try std.testing.expectEqualStrings("coder", cfg.agents[0].name);
+    const expected_provider = try std.fmt.allocPrint(allocator, "custom:http://127.0.0.1:{d}/v1", .{server.port});
+    defer allocator.free(expected_provider);
+    try std.testing.expectEqualStrings(expected_provider, cfg.agents[0].provider);
+    try std.testing.expectEqualStrings("mock-model", cfg.agents[0].model);
+
+    var dt = DelegateTool{ .agents = cfg.agents };
+    const tool = dt.tool();
+    const parsed = try root.parseTestArgs("{\"agent\":\"coder\",\"prompt\":\"Fix it\"}");
+    defer parsed.deinit();
+
+    const result = try tool.execute(allocator, parsed.value.object);
+    defer if (result.output.len > 0) allocator.free(result.output);
+    defer if (result.error_msg) |e| if (e.len > 0) allocator.free(e);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("delegate-ok", result.output);
 }

@@ -2844,6 +2844,23 @@ test "parse agents.list with id field" {
     allocator.free(cfg.agents);
 }
 
+test "parse agents.list primary model ref without provider field" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"agents": {"list": [{"id": "coder", "model": {"primary": "ollama/qwen3.5:cloud"}}]}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqual(@as(usize, 1), cfg.agents.len);
+    try std.testing.expectEqualStrings("coder", cfg.agents[0].name);
+    try std.testing.expectEqualStrings("ollama", cfg.agents[0].provider);
+    try std.testing.expectEqualStrings("qwen3.5:cloud", cfg.agents[0].model);
+    allocator.free(cfg.agents[0].name);
+    allocator.free(cfg.agents[0].provider);
+    allocator.free(cfg.agents[0].model);
+    allocator.free(cfg.agents);
+}
+
 test "parse top-level bindings with snake_case fields" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
