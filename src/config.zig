@@ -798,7 +798,8 @@ pub const Config = struct {
         try w.print("    \"shell_timeout_secs\": {d},\n", .{self.tools.shell_timeout_secs});
         try w.print("    \"shell_max_output_bytes\": {d},\n", .{self.tools.shell_max_output_bytes});
         try w.print("    \"max_file_size_bytes\": {d},\n", .{self.tools.max_file_size_bytes});
-        try w.print("    \"web_fetch_max_chars\": {d}", .{self.tools.web_fetch_max_chars});
+        try w.print("    \"web_fetch_max_chars\": {d},\n", .{self.tools.web_fetch_max_chars});
+        try w.print("    \"path_env_vars\": {f}", .{std.json.fmt(self.tools.path_env_vars, .{})});
         // tools.media.audio
         {
             const am = self.audio_media;
@@ -2520,6 +2521,56 @@ test "json parse autonomy allowed_paths" {
     try std.testing.expectEqualStrings("/tmp/scratch", cfg.autonomy.allowed_paths[1]);
     for (cfg.autonomy.allowed_paths) |p| allocator.free(p);
     allocator.free(cfg.autonomy.allowed_paths);
+}
+
+test "json parse tools.path_env_vars" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"tools": {"path_env_vars": ["LD_LIBRARY_PATH", "PYTHONHOME"]}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqual(@as(usize, 2), cfg.tools.path_env_vars.len);
+    try std.testing.expectEqualStrings("LD_LIBRARY_PATH", cfg.tools.path_env_vars[0]);
+    try std.testing.expectEqualStrings("PYTHONHOME", cfg.tools.path_env_vars[1]);
+    for (cfg.tools.path_env_vars) |p| allocator.free(p);
+    allocator.free(cfg.tools.path_env_vars);
+}
+
+test "save roundtrip preserves tools.path_env_vars" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{base});
+    defer allocator.free(config_path);
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.tools.path_env_vars = &.{ "LD_LIBRARY_PATH", "PYTHONHOME" };
+    try cfg.save();
+
+    const file = try std.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    defer allocator.free(content);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var loaded = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = arena.allocator(),
+    };
+    try loaded.parseJson(content);
+    try std.testing.expectEqual(@as(usize, 2), loaded.tools.path_env_vars.len);
+    try std.testing.expectEqualStrings("LD_LIBRARY_PATH", loaded.tools.path_env_vars[0]);
+    try std.testing.expectEqualStrings("PYTHONHOME", loaded.tools.path_env_vars[1]);
 }
 
 test "json parse autonomy allow_raw_url_chars" {
