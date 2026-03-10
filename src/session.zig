@@ -185,15 +185,17 @@ pub const SessionManager = struct {
 
         // Restore persisted conversation history from session store
         if (self.session_store) |store| {
-            const entries = store.loadMessages(self.allocator, session_key) catch &.{};
-            if (entries.len > 0) {
-                session.agent.loadHistory(entries) catch {};
-                session.agent.total_tokens = estimateRestoredSessionTokens(entries);
-                for (entries) |entry| {
-                    self.allocator.free(entry.role);
-                    self.allocator.free(entry.content);
+            const maybe_entries = store.loadMessages(self.allocator, session_key) catch null;
+            if (maybe_entries) |entries| {
+                defer memory_mod.freeMessages(self.allocator, entries);
+                if (entries.len > 0) {
+                    session.agent.loadHistory(entries) catch {};
                 }
-                self.allocator.free(entries);
+                if (try store.loadUsage(session_key)) |total_tokens| {
+                    session.agent.total_tokens = total_tokens;
+                } else if (entries.len > 0) {
+                    session.agent.total_tokens = estimateRestoredSessionTokens(entries);
+                }
             }
         }
 
@@ -464,6 +466,7 @@ pub const SessionManager = struct {
                 const persisted_assistant = persistedAssistantReply(&session.agent, response);
                 store.saveMessage(session_key, "user", content) catch {};
                 store.saveMessage(session_key, "assistant", persisted_assistant) catch {};
+                store.saveUsage(session_key, session.agent.total_tokens) catch {};
             }
         }
 
@@ -1471,12 +1474,13 @@ test "persisted session falls back to rendered response when degraded turn has n
     try testing.expectEqualStrings(response, entries[1].content);
     try testing.expect(!std.mem.eql(u8, entries[1].content, "running"));
 
-    const expected_tokens = agent_mod.estimate_text_tokens(response);
+    const live_total_tokens = session.agent.total_tokens;
+    try testing.expect(live_total_tokens > 0);
     session.last_active = 0;
     try testing.expectEqual(@as(usize, 1), sm.evictIdle(1));
 
     const restored_session = try sm.getOrCreate(session_key);
-    try testing.expectEqual(@as(u64, expected_tokens), restored_session.agent.total_tokens);
+    try testing.expectEqual(live_total_tokens, restored_session.agent.total_tokens);
 }
 
 test "restored session token reconstruction stays aligned across response cache hits" {
@@ -1520,13 +1524,14 @@ test "restored session token reconstruction stays aligned across response cache 
 
     const expected_tokens = agent_mod.estimate_text_tokens("assistant reply");
     const live_session = try sm.getOrCreate(session_key);
-    try testing.expectEqual(@as(u64, expected_tokens) * 2, live_session.agent.total_tokens);
+    try testing.expectEqual(@as(u64, expected_tokens), live_session.agent.total_tokens);
+    try testing.expectEqual(@as(u32, 0), live_session.agent.last_turn_usage.total_tokens);
 
     live_session.last_active = 0;
     try testing.expectEqual(@as(usize, 1), sm.evictIdle(1));
 
     const restored_session = try sm.getOrCreate(session_key);
-    try testing.expectEqual(@as(u64, expected_tokens) * 2, restored_session.agent.total_tokens);
+    try testing.expectEqual(@as(u64, expected_tokens), restored_session.agent.total_tokens);
 }
 
 test "processMessage different keys — independent sessions" {
