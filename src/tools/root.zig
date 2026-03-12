@@ -63,6 +63,8 @@ pub const shell = @import("shell.zig");
 pub const file_read = @import("file_read.zig");
 pub const file_write = @import("file_write.zig");
 pub const file_edit = @import("file_edit.zig");
+pub const file_read_hashed = @import("file_read_hashed.zig");
+pub const file_edit_hashed = @import("file_edit_hashed.zig");
 pub const http_request = @import("http_request.zig");
 pub const git = @import("git.zig");
 pub const memory_store = @import("memory_store.zig");
@@ -343,6 +345,22 @@ pub fn allTools(
     };
     try list.append(allocator, et2.tool());
 
+    const frh = try allocator.create(file_read_hashed.FileReadHashedTool);
+    frh.* = .{
+        .workspace_dir = workspace_dir,
+        .allowed_paths = opts.allowed_paths,
+        .max_file_size = tc.max_file_size_bytes,
+    };
+    try list.append(allocator, frh.tool());
+
+    const feh = try allocator.create(file_edit_hashed.FileEditHashedTool);
+    feh.* = .{
+        .workspace_dir = workspace_dir,
+        .allowed_paths = opts.allowed_paths,
+        .max_file_size = tc.max_file_size_bytes,
+    };
+    try list.append(allocator, feh.tool());
+
     const gt = try allocator.create(git.GitTool);
     gt.* = .{ .workspace_dir = workspace_dir };
     try list.append(allocator, gt.tool());
@@ -577,6 +595,22 @@ pub fn subagentTools(
     };
     try list.append(allocator, et.tool());
 
+    const frh = try allocator.create(file_read_hashed.FileReadHashedTool);
+    frh.* = .{
+        .workspace_dir = workspace_dir,
+        .allowed_paths = opts.allowed_paths,
+        .max_file_size = tc.max_file_size_bytes,
+    };
+    try list.append(allocator, frh.tool());
+
+    const feh = try allocator.create(file_edit_hashed.FileEditHashedTool);
+    feh.* = .{
+        .workspace_dir = workspace_dir,
+        .allowed_paths = opts.allowed_paths,
+        .max_file_size = tc.max_file_size_bytes,
+    };
+    try list.append(allocator, feh.tool());
+
     const gt = try allocator.create(git.GitTool);
     gt.* = .{ .workspace_dir = workspace_dir };
     try list.append(allocator, gt.tool());
@@ -740,21 +774,21 @@ test "all tools includes extras when enabled" {
     });
     defer deinitTools(std.testing.allocator, tools);
 
-    // Order: shell, file_read, file_write, file_edit, git, image_info,
+    // Order: shell, file_read, file_write, file_edit, file_read_hashed, file_edit_hashed, git, image_info,
     //        memory_store, memory_recall, memory_list, memory_forget,
     //        delegate, schedule, spawn, pushover, http_request, web_search,
-    //        web_fetch, browser = 18
-    try std.testing.expectEqual(@as(usize, 18), tools.len);
+    //        web_fetch, browser = 20
+    try std.testing.expectEqual(@as(usize, 20), tools.len);
 }
 
 test "all tools excludes extras when disabled" {
     const tools = try allTools(std.testing.allocator, "/tmp/yc_test", .{});
     defer deinitTools(std.testing.allocator, tools);
 
-    // Order: shell, file_read, file_write, file_edit, git, image_info,
+    // Order: shell, file_read, file_write, file_edit, file_read_hashed, file_edit_hashed, git, image_info,
     //        memory_store, memory_recall, memory_list, memory_forget,
-    //        delegate, schedule, spawn = 13
-    try std.testing.expectEqual(@as(usize, 13), tools.len);
+    //        delegate, schedule, spawn = 15
+    try std.testing.expectEqual(@as(usize, 15), tools.len);
 }
 
 test "all tools wires http and web_search config into tool instances" {
