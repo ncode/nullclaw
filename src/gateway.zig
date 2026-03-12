@@ -30,6 +30,7 @@ const PairingGuard = @import("security/pairing.zig").PairingGuard;
 const channels = @import("channels/root.zig");
 const bus_mod = @import("bus.zig");
 const a2a = @import("a2a.zig");
+const thread_stacks = @import("thread_stacks.zig");
 
 /// Maximum request body size (64KB) — prevents memory exhaustion.
 pub const MAX_BODY_SIZE: usize = 65_536;
@@ -2524,6 +2525,50 @@ fn applyRuntimeProviderOverrides(config: *const Config) !void {
     try providers.setApiErrorLimitOverride(config.diagnostics.api_error_max_chars);
 }
 
+const A2aStreamingWorker = struct {
+    allocator: std.mem.Allocator,
+    body: []u8,
+    stream: std.net.Stream,
+    registry: *a2a.TaskRegistry,
+    session_mgr: *session_mod.SessionManager,
+
+    fn run(self: *@This()) void {
+        defer self.stream.close();
+        defer self.allocator.free(self.body);
+        defer self.allocator.destroy(self);
+        a2a.handleStreamingRpc(self.allocator, self.body, &self.stream, self.registry, self.session_mgr);
+    }
+};
+
+fn spawnA2aStreamingWorker(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    stream: std.net.Stream,
+    registry: *a2a.TaskRegistry,
+    session_mgr: *session_mod.SessionManager,
+) !void {
+    const worker = try allocator.create(A2aStreamingWorker);
+    errdefer allocator.destroy(worker);
+
+    const owned_body = try allocator.dupe(u8, body);
+    errdefer allocator.free(owned_body);
+
+    worker.* = .{
+        .allocator = allocator,
+        .body = owned_body,
+        .stream = stream,
+        .registry = registry,
+        .session_mgr = session_mgr,
+    };
+
+    const thread = try std.Thread.spawn(
+        .{ .stack_size = thread_stacks.SESSION_TURN_STACK_SIZE },
+        A2aStreamingWorker.run,
+        .{worker},
+    );
+    thread.detach();
+}
+
 /// Run the HTTP gateway. Binds to host:port and serves HTTP requests.
 /// Endpoints: GET /health, GET /ready, POST /pair, POST /webhook, GET|POST /whatsapp, POST /telegram, POST /slack/events, POST /line, POST /lark, POST /qq
 /// If config_ptr is null, loads config internally (for backward compatibility).
@@ -2730,7 +2775,8 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     // Accept loop — read raw HTTP from TCP connections
     while (true) {
         var conn = server.accept() catch continue;
-        defer conn.stream.close();
+        var close_conn = true;
+        defer if (close_conn) conn.stream.close();
         configureRequestReadTimeout(&conn.stream);
 
         // Per-request arena — all request-scoped allocations freed in one shot
@@ -2838,11 +2884,16 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                     if (body) |b| {
                         if (session_mgr_opt) |*sm| {
                             if (a2a.isStreamingMethod(b)) {
-                                // SSE streaming — writes directly to the connection.
-                                // Skip normal response writing by using a sentinel.
-                                a2a.handleStreamingRpc(req_allocator, b, &conn.stream, &a2a_registry, sm);
-                                response_status = "";
-                                response_body = "";
+                                // SSE streaming runs in its own worker so the main accept
+                                // loop can continue serving tasks/cancel and new requests.
+                                if (spawnA2aStreamingWorker(allocator, b, conn.stream, &a2a_registry, sm)) {
+                                    close_conn = false;
+                                    response_status = "";
+                                    response_body = "";
+                                } else |_| {
+                                    response_status = "503 Service Unavailable";
+                                    response_body = "{\"error\":\"stream setup failed\"}";
+                                }
                             } else {
                                 const resp = a2a.handleJsonRpc(req_allocator, b, &a2a_registry, sm);
                                 response_status = resp.status;
