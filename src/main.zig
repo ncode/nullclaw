@@ -2740,6 +2740,11 @@ fn runMaxChannel(
 
     var mx = yc.channels.max.MaxChannel.initFromConfig(allocator, max_config);
 
+    if (mx.mode == .webhook) {
+        std.debug.print("nullclaw Max channel configured for webhook delivery.\n", .{});
+        return runGatewayChannel(allocator, config, "max");
+    }
+
     std.debug.print("nullclaw Max bot starting...\n", .{});
     std.debug.print("  Provider: {s}\n", .{config.default_provider});
     std.debug.print("  Account ID: {s}\n", .{mx.account_id});

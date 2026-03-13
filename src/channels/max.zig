@@ -22,6 +22,7 @@ const log = std.log.scoped(.max);
 
 pub const MAX_MESSAGE_LEN: usize = 4000;
 const CONTINUATION_MARKER = "\n\n\u{23EC}";
+const CALLBACK_PAYLOAD_PREFIX = "ncmax:";
 const TYPING_INTERVAL_NS: u64 = 4 * std.time.ns_per_s;
 const TYPING_SLEEP_STEP_NS: u64 = 100 * std.time.ns_per_ms;
 const DRAFT_MIN_EDIT_INTERVAL_MS: i64 = 500;
@@ -39,10 +40,10 @@ const AttachmentKind = enum {
 
     fn apiFileType(self: AttachmentKind) []const u8 {
         return switch (self) {
-            .image => "photo",
+            .image => "image",
             .document => "file",
             .video => "video",
-            .audio => "file",
+            .audio => "audio",
         };
     }
 
@@ -177,17 +178,44 @@ const PendingInteractionOption = struct {
 };
 
 const PendingInteraction = struct {
+    allocator: std.mem.Allocator,
     created_at: u64,
     expires_at: u64,
+    account_id: []const u8,
     chat_id: []const u8,
+    owner_identity: ?[]const u8 = null,
+    owner_only: bool = true,
     options: []PendingInteractionOption,
 
-    fn deinit(self: *const PendingInteraction, allocator: std.mem.Allocator) void {
-        allocator.free(self.chat_id);
-        for (self.options) |opt| opt.deinit(allocator);
-        allocator.free(self.options);
+    fn deinit(self: *const PendingInteraction) void {
+        self.allocator.free(self.account_id);
+        self.allocator.free(self.chat_id);
+        if (self.owner_identity) |owner| self.allocator.free(owner);
+        for (self.options) |opt| opt.deinit(self.allocator);
+        self.allocator.free(self.options);
     }
 };
+
+const CallbackSelection = union(enum) {
+    ok: struct {
+        submit_text: []u8,
+        callback_notification: []u8,
+    },
+    not_found,
+    expired,
+    owner_mismatch,
+    chat_mismatch,
+    invalid_option,
+};
+
+threadlocal var tls_interaction_owner_identity: ?[]const u8 = null;
+var shared_interactions_mu: std.Thread.Mutex = .{};
+var shared_interactions: std.StringHashMapUnmanaged(PendingInteraction) = .empty;
+var shared_interaction_seq: Atomic(u64) = Atomic(u64).init(1);
+
+pub fn setInteractiveOwnerContext(owner_identity: ?[]const u8) void {
+    tls_interaction_owner_identity = owner_identity;
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // Typing Task
@@ -241,10 +269,6 @@ pub const MaxChannel = struct {
 
     typing_mu: std.Thread.Mutex = .{},
     typing_handles: std.StringHashMapUnmanaged(*TypingTask) = .empty,
-
-    interaction_mu: std.Thread.Mutex = .{},
-    pending_interactions: std.StringHashMapUnmanaged(PendingInteraction) = .empty,
-    interaction_seq: Atomic(u64) = Atomic(u64).init(1),
 
     draft_mu: std.Thread.Mutex = .{},
     draft_buffers: std.StringHashMapUnmanaged(DraftState) = .empty,
@@ -308,6 +332,25 @@ pub const MaxChannel = struct {
         return self.isUserAllowed(sender_id);
     }
 
+    fn isAuthorizedSender(self: *const MaxChannel, sender: *const max_ingress.SenderInfo, is_group: bool) bool {
+        const identity = sender.identity();
+        const user_id = sender.user_id;
+
+        if (is_group) {
+            if (std.mem.eql(u8, self.group_policy, "open")) return true;
+            if (std.mem.eql(u8, self.group_policy, "disabled")) return false;
+            if (self.group_allow_from.len == 0) {
+                return root.isAllowed(self.allow_from, identity) or
+                    root.isAllowed(self.allow_from, user_id);
+            }
+            return root.isAllowed(self.group_allow_from, identity) or
+                root.isAllowed(self.group_allow_from, user_id);
+        }
+
+        return root.isAllowed(self.allow_from, identity) or
+            root.isAllowed(self.allow_from, user_id);
+    }
+
     // ── Fetch bot identity ───────────────────────────────────────────
 
     fn fetchBotIdentity(self: *MaxChannel) void {
@@ -321,6 +364,33 @@ pub const MaxChannel = struct {
         if (info.user_id) |uid| {
             self.bot_user_id = self.allocator.dupe(u8, uid) catch null;
         }
+    }
+
+    fn shouldProcessMessage(self: *MaxChannel, msg: max_ingress.InboundMessage) bool {
+        if (!self.require_mention or !msg.chat.isGroup()) return true;
+        const text = msg.text orelse return false;
+
+        if (self.bot_username == null and self.bot_user_id == null and !builtin.is_test) {
+            self.fetchBotIdentity();
+        }
+
+        return self.textMentionsBot(text);
+    }
+
+    fn textMentionsBot(self: *const MaxChannel, text: []const u8) bool {
+        if (self.bot_username) |username| {
+            var mention_buf: [256]u8 = undefined;
+            const mention = std.fmt.bufPrint(&mention_buf, "@{s}", .{username}) catch username;
+            if (asciiContainsIgnoreCase(text, mention)) return true;
+        }
+
+        if (self.bot_user_id) |user_id| {
+            var deep_link_buf: [256]u8 = undefined;
+            const deep_link = std.fmt.bufPrint(&deep_link_buf, "max://user/{s}", .{user_id}) catch user_id;
+            if (asciiContainsIgnoreCase(text, deep_link)) return true;
+        }
+
+        return false;
     }
 
     // ── Send (text + attachments) ────────────────────────────────────
@@ -392,13 +462,33 @@ pub const MaxChannel = struct {
 
     pub fn sendRichPayload(self: *MaxChannel, target: []const u8, payload: root.Channel.OutboundPayload) !void {
         if (payload.choices.len > 0 and self.interactive.enabled) {
-            const choices = try self.allocator.alloc([]const u8, payload.choices.len);
-            defer self.allocator.free(choices);
-            for (payload.choices, 0..) |choice, i| {
-                choices[i] = choice.label;
+            const token = try self.nextInteractionToken();
+            defer self.allocator.free(token);
+
+            const buttons = try self.allocator.alloc(max_api.InlineKeyboardButton, payload.choices.len);
+            defer self.allocator.free(buttons);
+
+            var payload_bufs = try self.allocator.alloc([]u8, payload.choices.len);
+            var built_payloads: usize = 0;
+            defer {
+                for (payload_bufs[0..built_payloads]) |value| self.allocator.free(value);
+                self.allocator.free(payload_bufs);
             }
 
-            const keyboard_json = try max_api.buildInlineKeyboardJson(self.allocator, choices);
+            for (payload.choices, 0..) |choice, i| {
+                payload_bufs[i] = try std.fmt.allocPrint(self.allocator, "{s}{s}:{d}", .{
+                    CALLBACK_PAYLOAD_PREFIX,
+                    token,
+                    i,
+                });
+                buttons[i] = .{
+                    .text = choice.label,
+                    .payload = payload_bufs[i],
+                };
+                built_payloads += 1;
+            }
+
+            const keyboard_json = try max_api.buildInlineKeyboardButtonsJson(self.allocator, buttons);
             defer self.allocator.free(keyboard_json);
 
             const body_json = try max_api.buildTextWithKeyboardBody(
@@ -412,14 +502,23 @@ pub const MaxChannel = struct {
             const resp = try self.api().sendMessage(self.allocator, target, body_json);
             defer self.allocator.free(resp);
 
-            // Parse message ID and register pending interaction
-            if (max_api.Client.parseSentMessageMid(self.allocator, resp)) |meta| {
-                defer meta.deinit(self.allocator);
-                if (meta.mid) |mid| {
-                    self.registerPendingInteraction(target, mid, payload.choices) catch |err| {
-                        log.warn("max registerPendingInteraction failed: {}", .{err});
-                    };
-                }
+            self.registerPendingInteraction(
+                token,
+                target,
+                tls_interaction_owner_identity,
+                payload.choices,
+            ) catch |err| log.warn("max registerPendingInteraction failed: {}", .{err});
+
+            for (payload.attachments) |att| {
+                const kind: AttachmentKind = switch (att.kind) {
+                    .image => .image,
+                    .document => .document,
+                    .video => .video,
+                    .audio, .voice => .audio,
+                };
+                self.sendAttachment(target, .{ .kind = kind, .target = att.target }) catch |err| {
+                    log.warn("max sendAttachment failed: {}", .{err});
+                };
             }
             return;
         }
@@ -450,10 +549,18 @@ pub const MaxChannel = struct {
 
     // ── Pending interactions ──────────────────────────────────────────
 
+    fn nextInteractionToken(self: *const MaxChannel) ![]u8 {
+        var token_buf: [32]u8 = undefined;
+        const seq = shared_interaction_seq.fetchAdd(1, .monotonic);
+        const token = std.fmt.bufPrint(&token_buf, "{x}", .{seq}) catch unreachable;
+        return self.allocator.dupe(u8, token);
+    }
+
     fn registerPendingInteraction(
         self: *MaxChannel,
+        token: []const u8,
         chat_id: []const u8,
-        mid: []const u8,
+        owner_identity: ?[]const u8,
         choices: []const root.Channel.OutboundChoice,
     ) !void {
         const now = root.nowEpochSecs();
@@ -475,89 +582,126 @@ pub const MaxChannel = struct {
             built += 1;
         }
 
-        const key = try self.allocator.dupe(u8, mid);
+        const key = try self.allocator.dupe(u8, token);
         errdefer self.allocator.free(key);
 
         const chat_id_dup = try self.allocator.dupe(u8, chat_id);
         errdefer self.allocator.free(chat_id_dup);
 
-        self.interaction_mu.lock();
-        defer self.interaction_mu.unlock();
+        const account_id_dup = try self.allocator.dupe(u8, self.account_id);
+        errdefer self.allocator.free(account_id_dup);
 
-        // Expire stale interactions
+        const owner_dup = if (owner_identity) |owner|
+            try self.allocator.dupe(u8, owner)
+        else
+            null;
+        errdefer if (owner_dup) |owner| self.allocator.free(owner);
+
+        shared_interactions_mu.lock();
+        defer shared_interactions_mu.unlock();
+
         self.expireInteractionsLocked(now);
 
-        try self.pending_interactions.put(self.allocator, key, .{
+        try shared_interactions.put(self.allocator, key, .{
+            .allocator = self.allocator,
             .created_at = now,
             .expires_at = now + ttl,
+            .account_id = account_id_dup,
             .chat_id = chat_id_dup,
+            .owner_identity = owner_dup,
+            .owner_only = self.interactive.owner_only,
             .options = options,
         });
     }
 
     fn expireInteractionsLocked(self: *MaxChannel, now: u64) void {
-        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer to_remove.deinit(self.allocator);
+        while (true) {
+            var expired_key: ?[]const u8 = null;
+            var it = shared_interactions.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.expires_at < now) {
+                    expired_key = entry.key_ptr.*;
+                    break;
+                }
+            }
 
-        var it = self.pending_interactions.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.expires_at < now) {
-                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
+            const key = expired_key orelse break;
+            if (shared_interactions.fetchRemove(key)) |removed| {
+                removed.value.deinit();
+                removed.value.allocator.free(@constCast(removed.key));
             }
         }
 
-        for (to_remove.items) |key| {
-            if (self.pending_interactions.fetchRemove(key)) |removed| {
-                removed.value.deinit(self.allocator);
-                self.allocator.free(@constCast(removed.key));
-            }
+        if (shared_interactions.count() == 0) {
+            shared_interactions.deinit(self.allocator);
+            shared_interactions = .empty;
         }
     }
 
-    fn lookupInteractionByPayload(self: *MaxChannel, payload: []const u8) ?struct {
-        submit_text: []u8,
-        callback_notification: []u8,
-    } {
-        self.interaction_mu.lock();
-        defer self.interaction_mu.unlock();
+    fn consumeInteractionSelection(
+        self: *MaxChannel,
+        token: []const u8,
+        option_index: usize,
+        sender_identity: []const u8,
+        chat_id: []const u8,
+    ) CallbackSelection {
+        shared_interactions_mu.lock();
+        defer shared_interactions_mu.unlock();
 
         const now = root.nowEpochSecs();
         self.expireInteractionsLocked(now);
 
-        // Search all pending interactions for a matching option
-        var interactions_it = self.pending_interactions.iterator();
-        while (interactions_it.next()) |entry| {
-            const interaction = entry.value_ptr;
-            for (interaction.options) |opt| {
-                if (std.mem.eql(u8, opt.label, payload)) {
-                    const submit = self.allocator.dupe(u8, opt.submit_text) catch return null;
-                    const notif = self.allocator.dupe(u8, opt.label) catch {
-                        self.allocator.free(submit);
-                        return null;
-                    };
-                    return .{
-                        .submit_text = submit,
-                        .callback_notification = notif,
-                    };
-                }
-            }
+        const interaction = shared_interactions.getPtr(token) orelse return .not_found;
+        if (!std.ascii.eqlIgnoreCase(interaction.account_id, self.account_id)) return .not_found;
+        if (!std.mem.eql(u8, interaction.chat_id, chat_id)) return .chat_mismatch;
+        if (interaction.owner_only and interaction.owner_identity != null and
+            !std.ascii.eqlIgnoreCase(interaction.owner_identity.?, sender_identity))
+        {
+            return .owner_mismatch;
+        }
+        if (option_index >= interaction.options.len) return .invalid_option;
+
+        const submit_text = self.allocator.dupe(u8, interaction.options[option_index].submit_text) catch return .invalid_option;
+        errdefer self.allocator.free(submit_text);
+
+        const callback_notification = self.allocator.dupe(u8, interaction.options[option_index].label) catch return .invalid_option;
+
+        if (shared_interactions.fetchRemove(token)) |removed| {
+            removed.value.deinit();
+            removed.value.allocator.free(@constCast(removed.key));
         }
 
-        return null;
+        return .{ .ok = .{
+            .submit_text = submit_text,
+            .callback_notification = callback_notification,
+        } };
     }
 
     fn deinitPendingInteractions(self: *MaxChannel) void {
-        self.interaction_mu.lock();
-        var interactions = self.pending_interactions;
-        self.pending_interactions = .empty;
-        self.interaction_mu.unlock();
+        shared_interactions_mu.lock();
+        defer shared_interactions_mu.unlock();
 
-        var it = interactions.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.deinit(self.allocator);
-            self.allocator.free(@constCast(entry.key_ptr.*));
+        while (true) {
+            var matching_key: ?[]const u8 = null;
+            var it = shared_interactions.iterator();
+            while (it.next()) |entry| {
+                if (std.ascii.eqlIgnoreCase(entry.value_ptr.account_id, self.account_id)) {
+                    matching_key = entry.key_ptr.*;
+                    break;
+                }
+            }
+
+            const key = matching_key orelse break;
+            if (shared_interactions.fetchRemove(key)) |removed| {
+                removed.value.deinit();
+                removed.value.allocator.free(@constCast(removed.key));
+            }
         }
-        interactions.deinit(self.allocator);
+
+        if (shared_interactions.count() == 0) {
+            shared_interactions.deinit(self.allocator);
+            shared_interactions = .empty;
+        }
     }
 
     // ── Draft streaming (sendEvent) ──────────────────────────────────
@@ -653,17 +797,42 @@ pub const MaxChannel = struct {
     }
 
     fn handleSendEventFinal(self: *MaxChannel, target: []const u8, message: []const u8) !void {
-        // Clean up draft state
-        {
-            self.draft_mu.lock();
-            defer self.draft_mu.unlock();
+        var draft_mid: ?[]u8 = null;
+        self.draft_mu.lock();
+        if (self.draft_buffers.getPtr(target)) |state| {
+            if (state.mid) |mid| {
+                draft_mid = self.allocator.dupe(u8, mid) catch null;
+            }
             self.clearDraftForTarget(target);
         }
+        self.draft_mu.unlock();
+        defer if (draft_mid) |mid| self.allocator.free(mid);
 
-        // Send final message through normal path
-        if (message.len > 0) {
-            try self.sendMessage(target, message);
+        if (message.len == 0) return;
+
+        if (draft_mid) |mid| {
+            const parsed = try parseAttachmentMarkers(self.allocator, message);
+            defer parsed.deinit(self.allocator);
+
+            if (parsed.remaining_text.len > 0) {
+                const body = try max_api.buildTextMessageBody(self.allocator, parsed.remaining_text, "markdown");
+                defer self.allocator.free(body);
+
+                const resp = try self.api().editMessage(self.allocator, mid, body);
+                self.allocator.free(resp);
+            } else {
+                self.api().deleteMessage(self.allocator, mid) catch {};
+            }
+
+            for (parsed.attachments) |att| {
+                self.sendAttachment(target, att) catch |err| {
+                    log.warn("max sendAttachment failed: {}", .{err});
+                };
+            }
+            return;
         }
+
+        try self.sendMessage(target, message);
     }
 
     // ── Typing indicator ─────────────────────────────────────────────
@@ -742,9 +911,12 @@ pub const MaxChannel = struct {
             .message => |msg| {
                 defer msg.deinit(allocator);
 
-                const sender_id = msg.sender.identity();
-                if (!self.isAuthorized(sender_id, msg.chat.isGroup())) {
-                    log.warn("ignoring message from unauthorized user: {s}", .{sender_id});
+                if (!self.isAuthorizedSender(&msg.sender, msg.chat.isGroup())) {
+                    log.warn("ignoring message from unauthorized user: {s}", .{msg.sender.identity()});
+                    return null;
+                }
+
+                if (!self.shouldProcessMessage(msg)) {
                     return null;
                 }
 
@@ -772,7 +944,7 @@ pub const MaxChannel = struct {
 
                 const id_owned = allocator.dupe(u8, msg.mid orelse "unknown") catch return null;
                 errdefer allocator.free(id_owned);
-                const sender_owned = allocator.dupe(u8, sender_id) catch {
+                const sender_owned = allocator.dupe(u8, msg.sender.identity()) catch {
                     allocator.free(id_owned);
                     return null;
                 };
@@ -809,16 +981,42 @@ pub const MaxChannel = struct {
             .callback => |cb| {
                 defer cb.deinit(allocator);
 
-                // Try to match against pending interaction
-                const selection = self.lookupInteractionByPayload(cb.payload);
-                const content_text = if (selection) |sel| sel.submit_text else blk: {
+                if (!self.isAuthorizedSender(&cb.sender, cb.is_group)) {
+                    self.api().answerCallback(allocator, cb.callback_id, "You are not allowed to use this button") catch {};
+                    return null;
+                }
+
+                const content_text = blk: {
+                    if (parseCallbackPayload(cb.payload)) |parsed_payload| {
+                        switch (self.consumeInteractionSelection(
+                            parsed_payload.token,
+                            parsed_payload.option_index,
+                            cb.sender.identity(),
+                            cb.chat_id,
+                        )) {
+                            .ok => |selection| {
+                                self.api().answerCallback(allocator, cb.callback_id, selection.callback_notification) catch {};
+                                allocator.free(selection.callback_notification);
+                                break :blk selection.submit_text;
+                            },
+                            .owner_mismatch => {
+                                self.api().answerCallback(allocator, cb.callback_id, "Only the original user can use this button") catch {};
+                                return null;
+                            },
+                            .expired, .not_found => {
+                                self.api().answerCallback(allocator, cb.callback_id, "Button expired or already handled") catch {};
+                                return null;
+                            },
+                            .chat_mismatch, .invalid_option => {
+                                self.api().answerCallback(allocator, cb.callback_id, "Invalid button") catch {};
+                                return null;
+                            },
+                        }
+                    }
+
+                    self.api().answerCallback(allocator, cb.callback_id, null) catch {};
                     break :blk allocator.dupe(u8, cb.payload) catch return null;
                 };
-                const notification = if (selection) |sel| sel.callback_notification else null;
-
-                // Answer the callback (best-effort)
-                self.api().answerCallback(allocator, cb.callback_id, notification) catch {};
-                if (notification) |n| allocator.free(n);
 
                 const id_owned = allocator.dupe(u8, cb.callback_id) catch {
                     allocator.free(content_text);
@@ -845,10 +1043,16 @@ pub const MaxChannel = struct {
                     .channel = "max",
                     .timestamp = root.nowEpochSecs(),
                     .reply_target = reply_target,
+                    .is_group = cb.is_group,
                 };
             },
             .bot_started => |bs| {
                 defer bs.deinit(allocator);
+
+                if (!self.isAuthorizedSender(&bs.sender, false)) {
+                    log.warn("ignoring max bot_started from unauthorized user: {s}", .{bs.sender.identity()});
+                    return null;
+                }
 
                 // Build /start content
                 var start_content: std.ArrayListUnmanaged(u8) = .empty;
@@ -935,21 +1139,50 @@ pub const MaxChannel = struct {
             }
         }
 
-        return messages.toOwnedSlice(allocator) catch &.{};
+        return try messages.toOwnedSlice(allocator);
     }
 
     // ── VTable wrappers ──────────────────────────────────────────────
 
     fn vtableStart(ptr: *anyopaque) anyerror!void {
         const self: *MaxChannel = @ptrCast(@alignCast(ptr));
-        // Fetch bot identity
-        self.fetchBotIdentity();
+        if (self.mode == .polling) {
+            if (self.webhook_url) |webhook_url| {
+                if (webhook_url.len > 0 and !builtin.is_test) {
+                    self.api().unsubscribe(self.allocator, webhook_url) catch {};
+                }
+            }
+        }
+
+        if (self.mode == .webhook) {
+            const webhook_url = self.webhook_url orelse return error.MissingWebhookUrl;
+            const trimmed_url = std.mem.trim(u8, webhook_url, " \t\r\n");
+            if (trimmed_url.len == 0) return error.MissingWebhookUrl;
+            if (!std.mem.startsWith(u8, trimmed_url, "https://")) return error.InvalidWebhookUrl;
+
+            if (!builtin.is_test) {
+                const resp = try self.api().subscribe(self.allocator, trimmed_url, self.webhook_secret);
+                self.allocator.free(resp);
+            }
+        }
+
         self.running = true;
+        self.fetchBotIdentity();
     }
 
     fn vtableStop(ptr: *anyopaque) void {
         const self: *MaxChannel = @ptrCast(@alignCast(ptr));
         self.running = false;
+        if (self.mode == .webhook and !builtin.is_test) {
+            if (self.webhook_url) |webhook_url| {
+                const trimmed_url = std.mem.trim(u8, webhook_url, " \t\r\n");
+                if (trimmed_url.len > 0) {
+                    self.api().unsubscribe(self.allocator, trimmed_url) catch |err| {
+                        log.warn("max unsubscribe failed: {}", .{err});
+                    };
+                }
+            }
+        }
         self.stopAllTyping();
         self.deinitPendingInteractions();
         self.deinitDraftBuffers();
@@ -1070,6 +1303,37 @@ fn allocatorDupeSlice(allocator: std.mem.Allocator, slice: []const u8) ![]u8 {
     return allocator.dupe(u8, slice);
 }
 
+fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or haystack.len < needle.len) return false;
+
+    var start: usize = 0;
+    while (start + needle.len <= haystack.len) : (start += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[start .. start + needle.len], needle)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn parseCallbackPayload(payload: []const u8) ?struct {
+    token: []const u8,
+    option_index: usize,
+} {
+    if (!std.mem.startsWith(u8, payload, CALLBACK_PAYLOAD_PREFIX)) return null;
+
+    const remainder = payload[CALLBACK_PAYLOAD_PREFIX.len..];
+    const sep = std.mem.lastIndexOfScalar(u8, remainder, ':') orelse return null;
+    if (sep == 0 or sep + 1 >= remainder.len) return null;
+
+    const token = remainder[0..sep];
+    const option_index = std.fmt.parseUnsigned(usize, remainder[sep + 1 ..], 10) catch return null;
+
+    return .{
+        .token = token,
+        .option_index = option_index,
+    };
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Tests
 // ════════════════════════════════════════════════════════════════════════════
@@ -1174,6 +1438,78 @@ test "isGroupUserAllowed wildcard" {
     try std.testing.expect(ch.isGroupUserAllowed("anyone"));
 }
 
+test "processUpdate matches allowlist by numeric user_id when username is present" {
+    const allocator = std.testing.allocator;
+    const allow = [_][]const u8{"42"};
+    var ch = testChannelWithAllowFrom(&allow);
+    const json =
+        \\{"update_type":"message_created","timestamp":1710000000,
+        \\"message":{"sender":{"user_id":"42","name":"Alice","username":"alice"},
+        \\"recipient":{"chat_id":"100","chat_type":"dialog"},
+        \\"body":{"mid":"msg-1","text":"Hello"}}}
+    ;
+    var parsed = try parseTestJson(allocator, json);
+    defer parsed.deinit();
+
+    const msg = ch.processUpdate(allocator, parsed.value) orelse return error.TestUnexpectedResult;
+    defer msg.deinit(allocator);
+    try std.testing.expectEqualStrings("alice", msg.sender);
+}
+
+test "processUpdate require_mention drops unmentioned group message" {
+    const allocator = std.testing.allocator;
+    const allow = [_][]const u8{"*"};
+    var ch = MaxChannel{
+        .allocator = allocator,
+        .bot_token = "test-token",
+        .allow_from = &allow,
+        .group_allow_from = &allow,
+        .group_policy = "allowlist",
+        .require_mention = true,
+    };
+    ch.bot_username = try allocator.dupe(u8, "maxbot");
+    defer if (ch.bot_username) |username| allocator.free(username);
+
+    const json =
+        \\{"update_type":"message_created","timestamp":1710000001,
+        \\"message":{"sender":{"user_id":"42","name":"Alice","username":"alice"},
+        \\"recipient":{"chat_id":"200","chat_type":"chat"},
+        \\"body":{"mid":"msg-2","text":"hello everyone"}}}
+    ;
+    var parsed = try parseTestJson(allocator, json);
+    defer parsed.deinit();
+
+    try std.testing.expect(ch.processUpdate(allocator, parsed.value) == null);
+}
+
+test "processUpdate require_mention accepts explicit bot mention" {
+    const allocator = std.testing.allocator;
+    const allow = [_][]const u8{"*"};
+    var ch = MaxChannel{
+        .allocator = allocator,
+        .bot_token = "test-token",
+        .allow_from = &allow,
+        .group_allow_from = &allow,
+        .group_policy = "allowlist",
+        .require_mention = true,
+    };
+    ch.bot_username = try allocator.dupe(u8, "maxbot");
+    defer if (ch.bot_username) |username| allocator.free(username);
+
+    const json =
+        \\{"update_type":"message_created","timestamp":1710000002,
+        \\"message":{"sender":{"user_id":"42","name":"Alice","username":"alice"},
+        \\"recipient":{"chat_id":"200","chat_type":"chat"},
+        \\"body":{"mid":"msg-3","text":"@MaxBot please help"}}}
+    ;
+    var parsed = try parseTestJson(allocator, json);
+    defer parsed.deinit();
+
+    const msg = ch.processUpdate(allocator, parsed.value) orelse return error.TestUnexpectedResult;
+    defer msg.deinit(allocator);
+    try std.testing.expectEqualStrings("@MaxBot please help", msg.content);
+}
+
 test "processUpdate message_created produces ChannelMessage" {
     const allocator = std.testing.allocator;
     const allow = [_][]const u8{"*"};
@@ -1262,6 +1598,78 @@ test "processUpdate message_callback maps to ChannelMessage" {
     try std.testing.expectEqualStrings("opt1", msg.content);
     try std.testing.expectEqualStrings("max", msg.channel);
     try std.testing.expectEqualStrings("100", msg.reply_target.?);
+}
+
+test "processUpdate callback consumes registered interaction token once" {
+    const allocator = std.testing.allocator;
+    const allow = [_][]const u8{"*"};
+    var ch = testChannelWithAllowFrom(&allow);
+    defer ch.deinitPendingInteractions();
+
+    const choices = [_]root.Channel.OutboundChoice{
+        .{ .id = "yes", .label = "Yes", .submit_text = "Confirm action" },
+    };
+    try ch.registerPendingInteraction("tok1", "100", "alice", &choices);
+
+    const json =
+        \\{"update_type":"message_callback","callback_id":"cb-2",
+        \\"callback":{"payload":"ncmax:tok1:0","user":{"user_id":"42","name":"Alice","username":"alice"},
+        \\"message":{"recipient":{"chat_id":"100"}}}}
+    ;
+    var parsed = try parseTestJson(allocator, json);
+    defer parsed.deinit();
+
+    const first = ch.processUpdate(allocator, parsed.value) orelse return error.TestUnexpectedResult;
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("Confirm action", first.content);
+
+    try std.testing.expect(ch.processUpdate(allocator, parsed.value) == null);
+}
+
+test "processUpdate callback enforces owner_only" {
+    const allocator = std.testing.allocator;
+    const allow = [_][]const u8{"*"};
+    var ch = testChannelWithAllowFrom(&allow);
+    defer ch.deinitPendingInteractions();
+
+    const choices = [_]root.Channel.OutboundChoice{
+        .{ .id = "yes", .label = "Yes", .submit_text = "Confirm action" },
+    };
+    try ch.registerPendingInteraction("tok2", "100", "alice", &choices);
+
+    const json =
+        \\{"update_type":"message_callback","callback_id":"cb-3",
+        \\"callback":{"payload":"ncmax:tok2:0","user":{"user_id":"7","name":"Bob","username":"bob"},
+        \\"message":{"recipient":{"chat_id":"100"}}}}
+    ;
+    var parsed = try parseTestJson(allocator, json);
+    defer parsed.deinit();
+
+    try std.testing.expect(ch.processUpdate(allocator, parsed.value) == null);
+}
+
+test "processUpdate callback preserves group routing" {
+    const allocator = std.testing.allocator;
+    const allow = [_][]const u8{"*"};
+    var ch = MaxChannel{
+        .allocator = allocator,
+        .bot_token = "test-token",
+        .allow_from = &allow,
+        .group_allow_from = &allow,
+        .group_policy = "allowlist",
+    };
+
+    const json =
+        \\{"update_type":"message_callback","callback_id":"cb-4",
+        \\"callback":{"payload":"plain","user":{"user_id":"42","name":"Alice","username":"alice"},
+        \\"message":{"recipient":{"chat_id":"200","chat_type":"chat"}}}}
+    ;
+    var parsed = try parseTestJson(allocator, json);
+    defer parsed.deinit();
+
+    const msg = ch.processUpdate(allocator, parsed.value) orelse return error.TestUnexpectedResult;
+    defer msg.deinit(allocator);
+    try std.testing.expect(msg.is_group);
 }
 
 test "processUpdate bot_started with payload" {
@@ -1512,6 +1920,42 @@ test "initFromConfig sets all fields" {
     try std.testing.expect(ch.require_mention);
 }
 
+test "vtableStart webhook mode requires https webhook URL" {
+    var missing = MaxChannel{
+        .allocator = std.testing.allocator,
+        .bot_token = "test-token",
+        .allow_from = &.{},
+        .group_allow_from = &.{},
+        .group_policy = "allowlist",
+        .mode = .webhook,
+    };
+    try std.testing.expectError(error.MissingWebhookUrl, MaxChannel.vtableStart(@ptrCast(&missing)));
+
+    var insecure = MaxChannel{
+        .allocator = std.testing.allocator,
+        .bot_token = "test-token",
+        .allow_from = &.{},
+        .group_allow_from = &.{},
+        .group_policy = "allowlist",
+        .mode = .webhook,
+        .webhook_url = "http://example.com/max",
+    };
+    try std.testing.expectError(error.InvalidWebhookUrl, MaxChannel.vtableStart(@ptrCast(&insecure)));
+
+    var secure = MaxChannel{
+        .allocator = std.testing.allocator,
+        .bot_token = "test-token",
+        .allow_from = &.{},
+        .group_allow_from = &.{},
+        .group_policy = "allowlist",
+        .mode = .webhook,
+        .webhook_url = "https://example.com/max",
+    };
+    try MaxChannel.vtableStart(@ptrCast(&secure));
+    try std.testing.expect(secure.running);
+    MaxChannel.vtableStop(@ptrCast(&secure));
+}
+
 test "send invokes sendMessage without error" {
     var ch = testChannel();
     // Test mode: API calls are mocked, so this should succeed
@@ -1573,10 +2017,10 @@ test "vtableStop cleans up all resources" {
 }
 
 test "AttachmentKind apiFileType mapping" {
-    try std.testing.expectEqualStrings("photo", AttachmentKind.image.apiFileType());
+    try std.testing.expectEqualStrings("image", AttachmentKind.image.apiFileType());
     try std.testing.expectEqualStrings("file", AttachmentKind.document.apiFileType());
     try std.testing.expectEqualStrings("video", AttachmentKind.video.apiFileType());
-    try std.testing.expectEqualStrings("file", AttachmentKind.audio.apiFileType());
+    try std.testing.expectEqualStrings("audio", AttachmentKind.audio.apiFileType());
 }
 
 test "pollUpdates returns empty in test mode" {
@@ -1591,6 +2035,13 @@ test "pollUpdates returns empty in test mode" {
         if (messages.len > 0) allocator.free(messages);
     }
     try std.testing.expectEqual(@as(usize, 0), messages.len);
+}
+
+test "parseCallbackPayload parses token and option index" {
+    const parsed = parseCallbackPayload("ncmax:abc123:7") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("abc123", parsed.token);
+    try std.testing.expectEqual(@as(usize, 7), parsed.option_index);
+    try std.testing.expect(parseCallbackPayload("plain") == null);
 }
 
 test {

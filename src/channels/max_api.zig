@@ -8,6 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const root = @import("root.zig");
+const url_percent = @import("../url_percent.zig");
 
 const log = std.log.scoped(.max_api);
 
@@ -45,6 +46,21 @@ pub const SentMessageMeta = struct {
     }
 };
 
+pub const UploadDescriptor = struct {
+    url: ?[]u8 = null,
+    token: ?[]u8 = null,
+
+    pub fn deinit(self: *const UploadDescriptor, allocator: std.mem.Allocator) void {
+        if (self.url) |v| allocator.free(v);
+        if (self.token) |v| allocator.free(v);
+    }
+};
+
+pub const InlineKeyboardButton = struct {
+    text: []const u8,
+    payload: []const u8,
+};
+
 // ════════════════════════════════════════════════════════════════════════════
 // Client
 // ════════════════════════════════════════════════════════════════════════════
@@ -75,7 +91,7 @@ pub const Client = struct {
 
     fn authHeader(self: Client, buf: []u8) ![]const u8 {
         var fbs = std.io.fixedBufferStream(buf);
-        try fbs.writer().print("Authorization: {s}", .{self.bot_token});
+        try fbs.writer().print("Authorization: Bearer {s}", .{self.bot_token});
         return fbs.getWritten();
     }
 
@@ -151,9 +167,11 @@ pub const Client = struct {
             return allocator.dupe(u8, "{\"message\":{\"body\":{\"mid\":\"test-mid-123\"}}}");
         }
         var url_buf: [512]u8 = undefined;
-        var query_buf: [128]u8 = undefined;
+        const encoded_chat_id = try url_percent.encode(allocator, chat_id);
+        defer allocator.free(encoded_chat_id);
+        var query_buf: [256]u8 = undefined;
         var query_fbs = std.io.fixedBufferStream(&query_buf);
-        try query_fbs.writer().print("chat_id={s}", .{chat_id});
+        try query_fbs.writer().print("chat_id={s}", .{encoded_chat_id});
         const url = try buildUrl(&url_buf, "/messages", query_fbs.getWritten());
 
         var auth_buf: [512]u8 = undefined;
@@ -185,9 +203,11 @@ pub const Client = struct {
             return allocator.dupe(u8, "{\"success\":true}");
         }
         var url_buf: [512]u8 = undefined;
-        var query_buf: [128]u8 = undefined;
+        const encoded_message_id = try url_percent.encode(allocator, message_id);
+        defer allocator.free(encoded_message_id);
+        var query_buf: [256]u8 = undefined;
         var query_fbs = std.io.fixedBufferStream(&query_buf);
-        try query_fbs.writer().print("message_id={s}", .{message_id});
+        try query_fbs.writer().print("message_id={s}", .{encoded_message_id});
         const url = try buildUrl(&url_buf, "/messages", query_fbs.getWritten());
 
         var auth_buf: [512]u8 = undefined;
@@ -198,9 +218,11 @@ pub const Client = struct {
     pub fn deleteMessage(self: Client, allocator: std.mem.Allocator, message_id: []const u8) !void {
         if (comptime builtin.is_test) return;
         var url_buf: [512]u8 = undefined;
-        var query_buf: [128]u8 = undefined;
+        const encoded_message_id = try url_percent.encode(allocator, message_id);
+        defer allocator.free(encoded_message_id);
+        var query_buf: [256]u8 = undefined;
         var query_fbs = std.io.fixedBufferStream(&query_buf);
-        try query_fbs.writer().print("message_id={s}", .{message_id});
+        try query_fbs.writer().print("message_id={s}", .{encoded_message_id});
         const url = try buildUrl(&url_buf, "/messages", query_fbs.getWritten());
 
         var auth_buf: [512]u8 = undefined;
@@ -213,9 +235,11 @@ pub const Client = struct {
     pub fn answerCallback(self: Client, allocator: std.mem.Allocator, callback_id: []const u8, notification: ?[]const u8) !void {
         if (comptime builtin.is_test) return;
         var url_buf: [512]u8 = undefined;
-        var query_buf: [256]u8 = undefined;
+        const encoded_callback_id = try url_percent.encode(allocator, callback_id);
+        defer allocator.free(encoded_callback_id);
+        var query_buf: [384]u8 = undefined;
         var query_fbs = std.io.fixedBufferStream(&query_buf);
-        try query_fbs.writer().print("callback_id={s}", .{callback_id});
+        try query_fbs.writer().print("callback_id={s}", .{encoded_callback_id});
         const url = try buildUrl(&url_buf, "/answers", query_fbs.getWritten());
 
         var body: std.ArrayListUnmanaged(u8) = .empty;
@@ -240,12 +264,14 @@ pub const Client = struct {
             return allocator.dupe(u8, "{\"updates\":[]}");
         }
         var url_buf: [512]u8 = undefined;
-        var query_buf: [512]u8 = undefined;
+        var query_buf: [1024]u8 = undefined;
         var query_fbs = std.io.fixedBufferStream(&query_buf);
         const qw = query_fbs.writer();
         try qw.print("timeout={s}&types={s}", .{ timeout, UPDATE_TYPES });
         if (marker) |m| {
-            try qw.print("&marker={s}", .{m});
+            const encoded_marker = try url_percent.encode(allocator, m);
+            defer allocator.free(encoded_marker);
+            try qw.print("&marker={s}", .{encoded_marker});
         }
         const url = try buildUrl(&url_buf, "/updates", query_fbs.getWritten());
 
@@ -296,9 +322,11 @@ pub const Client = struct {
     pub fn unsubscribe(self: Client, allocator: std.mem.Allocator, webhook_url: []const u8) !void {
         if (comptime builtin.is_test) return;
         var url_buf: [512]u8 = undefined;
-        var query_buf: [512]u8 = undefined;
+        const encoded_url = try url_percent.encode(allocator, webhook_url);
+        defer allocator.free(encoded_url);
+        var query_buf: [1024]u8 = undefined;
         var query_fbs = std.io.fixedBufferStream(&query_buf);
-        try query_fbs.writer().print("url={s}", .{webhook_url});
+        try query_fbs.writer().print("url={s}", .{encoded_url});
         const url = try buildUrl(&url_buf, "/subscriptions", query_fbs.getWritten());
 
         var auth_buf: [512]u8 = undefined;
@@ -311,9 +339,11 @@ pub const Client = struct {
     pub fn sendTypingAction(self: Client, allocator: std.mem.Allocator, chat_id: []const u8) !void {
         if (comptime builtin.is_test) return;
         var url_buf: [512]u8 = undefined;
-        var path_buf: [256]u8 = undefined;
+        const encoded_chat_id = try url_percent.encode(allocator, chat_id);
+        defer allocator.free(encoded_chat_id);
+        var path_buf: [512]u8 = undefined;
         var path_fbs = std.io.fixedBufferStream(&path_buf);
-        try path_fbs.writer().print("/chats/{s}/actions", .{chat_id});
+        try path_fbs.writer().print("/chats/{s}/actions", .{encoded_chat_id});
         const url = try buildUrl(&url_buf, path_fbs.getWritten(), null);
 
         const body = "{\"action\":\"typing_on\"}";
@@ -330,70 +360,31 @@ pub const Client = struct {
             return allocator.dupe(u8, "{\"token\":\"test-upload-token\"}");
         }
         var url_buf: [256]u8 = undefined;
-        var query_buf: [64]u8 = undefined;
+        const encoded_file_type = try url_percent.encode(allocator, file_type);
+        defer allocator.free(encoded_file_type);
+        var query_buf: [128]u8 = undefined;
         var query_fbs = std.io.fixedBufferStream(&query_buf);
-        try query_fbs.writer().print("type={s}", .{file_type});
+        try query_fbs.writer().print("type={s}", .{encoded_file_type});
         const url = try buildUrl(&url_buf, "/uploads", query_fbs.getWritten());
 
-        // Multipart upload via curl -F
         var auth_buf: [512]u8 = undefined;
         const auth = try self.authHeader(&auth_buf);
+        const upload_init_resp = try root.http_util.curlPostWithProxy(allocator, url, "", &.{auth}, self.proxy, "30");
+        errdefer allocator.free(upload_init_resp);
 
-        var file_arg_buf: [1024]u8 = undefined;
-        var file_fbs = std.io.fixedBufferStream(&file_arg_buf);
-        try file_fbs.writer().print("data=@{s}", .{file_path});
-        const file_arg = file_fbs.getWritten();
+        const upload_desc = parseUploadDescriptor(allocator, upload_init_resp) orelse return error.CurlFailed;
+        defer upload_desc.deinit(allocator);
 
-        var argv_buf: [16][]const u8 = undefined;
-        var argc: usize = 0;
-        argv_buf[argc] = "curl";
-        argc += 1;
-        argv_buf[argc] = "-s";
-        argc += 1;
-        argv_buf[argc] = "-m";
-        argc += 1;
-        argv_buf[argc] = "120";
-        argc += 1;
+        const upload_url = upload_desc.url orelse return error.CurlFailed;
+        const upload_resp = try curlMultipartUpload(allocator, upload_url, auth, self.proxy, file_path);
 
-        if (self.proxy) |p| {
-            argv_buf[argc] = "-x";
-            argc += 1;
-            argv_buf[argc] = p;
-            argc += 1;
+        if (upload_desc.token != null) {
+            allocator.free(upload_resp);
+            return upload_init_resp;
         }
 
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = auth;
-        argc += 1;
-        argv_buf[argc] = "-F";
-        argc += 1;
-        argv_buf[argc] = file_arg;
-        argc += 1;
-        argv_buf[argc] = url;
-        argc += 1;
-
-        var child = std.process.Child.init(argv_buf[0..argc], allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-        try child.spawn();
-
-        const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
-        const term = child.wait() catch {
-            allocator.free(stdout);
-            return error.CurlWaitError;
-        };
-        switch (term) {
-            .Exited => |code| if (code != 0) {
-                allocator.free(stdout);
-                return error.CurlFailed;
-            },
-            else => {
-                allocator.free(stdout);
-                return error.CurlFailed;
-            },
-        }
-        return stdout;
+        allocator.free(upload_init_resp);
+        return upload_resp;
     }
 
     pub fn parseUploadToken(allocator: std.mem.Allocator, json: []const u8) ?[]u8 {
@@ -404,6 +395,28 @@ pub const Client = struct {
         const token_val = parsed.value.object.get("token") orelse return null;
         if (token_val != .string) return null;
         return allocator.dupe(u8, token_val.string) catch null;
+    }
+
+    pub fn parseUploadDescriptor(allocator: std.mem.Allocator, json: []const u8) ?UploadDescriptor {
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return null;
+        defer parsed.deinit();
+        if (parsed.value != .object) return null;
+
+        const url_val = if (parsed.value.object.get("url")) |value| blk: {
+            if (value != .string) break :blk null;
+            break :blk allocator.dupe(u8, value.string) catch return null;
+        } else null;
+        errdefer if (url_val) |v| allocator.free(v);
+
+        const token_val = if (parsed.value.object.get("token")) |value| blk: {
+            if (value != .string) break :blk null;
+            break :blk allocator.dupe(u8, value.string) catch return null;
+        } else null;
+
+        return .{
+            .url = url_val,
+            .token = token_val,
+        };
     }
 };
 
@@ -461,6 +474,70 @@ fn curlDelete(allocator: std.mem.Allocator, url: []const u8, auth_header: []cons
     }
 }
 
+fn curlMultipartUpload(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    auth_header: []const u8,
+    proxy: ?[]const u8,
+    file_path: []const u8,
+) ![]u8 {
+    var file_arg_buf: [1024]u8 = undefined;
+    var file_fbs = std.io.fixedBufferStream(&file_arg_buf);
+    try file_fbs.writer().print("data=@{s}", .{file_path});
+    const file_arg = file_fbs.getWritten();
+
+    var argv_buf: [18][]const u8 = undefined;
+    var argc: usize = 0;
+    argv_buf[argc] = "curl";
+    argc += 1;
+    argv_buf[argc] = "-s";
+    argc += 1;
+    argv_buf[argc] = "-m";
+    argc += 1;
+    argv_buf[argc] = "120";
+    argc += 1;
+
+    if (proxy) |p| {
+        argv_buf[argc] = "--proxy";
+        argc += 1;
+        argv_buf[argc] = p;
+        argc += 1;
+    }
+
+    argv_buf[argc] = "-H";
+    argc += 1;
+    argv_buf[argc] = auth_header;
+    argc += 1;
+    argv_buf[argc] = "-F";
+    argc += 1;
+    argv_buf[argc] = file_arg;
+    argc += 1;
+    argv_buf[argc] = url;
+    argc += 1;
+
+    var child = std.process.Child.init(argv_buf[0..argc], allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+
+    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
+    const term = child.wait() catch {
+        allocator.free(stdout);
+        return error.CurlWaitError;
+    };
+    switch (term) {
+        .Exited => |code| if (code != 0) {
+            allocator.free(stdout);
+            return error.CurlFailed;
+        },
+        else => {
+            allocator.free(stdout);
+            return error.CurlFailed;
+        },
+    }
+    return stdout;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // JSON body builders (free functions)
 // ════════════════════════════════════════════════════════════════════════════
@@ -506,16 +583,32 @@ pub fn buildTextWithKeyboardBody(allocator: std.mem.Allocator, text: []const u8,
 ///   { "buttons": [[{"type":"callback","text":"A","payload":"A"}], ...] }
 /// Each choice becomes a single-button row.
 pub fn buildInlineKeyboardJson(allocator: std.mem.Allocator, choices: []const []const u8) ![]u8 {
+    const buttons = try allocator.alloc(InlineKeyboardButton, choices.len);
+    defer allocator.free(buttons);
+    for (choices, 0..) |choice, i| {
+        buttons[i] = .{
+            .text = choice,
+            .payload = choice,
+        };
+    }
+    return buildInlineKeyboardButtonsJson(allocator, buttons);
+}
+
+pub fn buildInlineKeyboardButtonsJson(
+    allocator: std.mem.Allocator,
+    buttons: []const InlineKeyboardButton,
+) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\"buttons\":[");
-    for (choices, 0..) |choice, i| {
+    for (buttons, 0..) |button, i| {
         if (i > 0) try buf.appendSlice(allocator, ",");
         try buf.appendSlice(allocator, "[{\"type\":\"callback\",\"text\":");
-        try root.appendJsonStringW(buf.writer(allocator), choice);
+        try root.appendJsonStringW(buf.writer(allocator), button.text);
         try buf.appendSlice(allocator, ",\"payload\":");
-        try root.appendJsonStringW(buf.writer(allocator), choice);
+        try root.appendJsonStringW(buf.writer(allocator), button.payload);
+        try buf.appendSlice(allocator, ",\"intent\":\"default\"");
         try buf.appendSlice(allocator, "}]");
     }
     try buf.appendSlice(allocator, "]}");
@@ -543,6 +636,17 @@ test "buildUrl with compound query" {
     var buf: [512]u8 = undefined;
     const url = try Client.buildUrl(&buf, "/updates", "timeout=30&types=message_created&marker=abc");
     try std.testing.expectEqualStrings("https://platform-api.max.ru/updates?timeout=30&types=message_created&marker=abc", url);
+}
+
+test "authHeader adds Bearer prefix" {
+    const client = Client{
+        .allocator = std.testing.allocator,
+        .bot_token = "token-123",
+        .proxy = null,
+    };
+    var buf: [128]u8 = undefined;
+    const header = try client.authHeader(&buf);
+    try std.testing.expectEqualStrings("Authorization: Bearer token-123", header);
 }
 
 test "parseBotInfo with integer user_id" {
@@ -610,6 +714,22 @@ test "parseUploadToken extracts token" {
     try std.testing.expectEqualStrings("upload-tok-99", token);
 }
 
+test "parseUploadDescriptor extracts url and token" {
+    const allocator = std.testing.allocator;
+    const desc = Client.parseUploadDescriptor(allocator, "{\"url\":\"https://upload.example/max\",\"token\":\"tok-7\"}") orelse return error.TestExpectedEqual;
+    defer desc.deinit(allocator);
+    try std.testing.expectEqualStrings("https://upload.example/max", desc.url.?);
+    try std.testing.expectEqualStrings("tok-7", desc.token.?);
+}
+
+test "parseUploadDescriptor allows upload url without token" {
+    const allocator = std.testing.allocator;
+    const desc = Client.parseUploadDescriptor(allocator, "{\"url\":\"https://upload.example/max\"}") orelse return error.TestExpectedEqual;
+    defer desc.deinit(allocator);
+    try std.testing.expectEqualStrings("https://upload.example/max", desc.url.?);
+    try std.testing.expect(desc.token == null);
+}
+
 test "parseUploadToken returns null on missing token" {
     const allocator = std.testing.allocator;
     try std.testing.expect(Client.parseUploadToken(allocator, "{\"other\":1}") == null);
@@ -647,6 +767,20 @@ test "buildInlineKeyboardJson with multiple choices" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"text\":\"Yes\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"text\":\"No\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"callback\"") != null);
+}
+
+test "buildInlineKeyboardButtonsJson preserves custom payloads" {
+    const allocator = std.testing.allocator;
+    const buttons = [_]InlineKeyboardButton{
+        .{ .text = "Yes", .payload = "ncmax:1:0" },
+        .{ .text = "No", .payload = "ncmax:1:1" },
+    };
+    const json = try buildInlineKeyboardButtonsJson(allocator, &buttons);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"payload\":\"ncmax:1:0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"payload\":\"ncmax:1:1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"intent\":\"default\"") != null);
 }
 
 test "getMe returns mock data in test mode" {

@@ -199,6 +199,8 @@ else
             }
             pub fn setBus(_: *@This(), _: anytype) void {}
         };
+
+        pub fn setInteractiveOwnerContext(_: ?[]const u8) void {}
     };
 pub const dispatch = @import("dispatch.zig");
 

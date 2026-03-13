@@ -1916,13 +1916,15 @@ pub fn runMaxLoop(
             const reply_target = msg.reply_target orelse msg.sender;
             setScheduleToolContext(runtime.tools, "max", mx_ptr.account_id, reply_target);
             defer setScheduleToolContext(runtime.tools, null, null, null);
+            max_mod.setInteractiveOwnerContext(msg.sender);
+            defer max_mod.setInteractiveOwnerContext(null);
 
             var key_buf: [192]u8 = undefined;
             var routed_session_key: ?[]const u8 = null;
             defer if (routed_session_key) |key| allocator.free(key);
 
             const session_key = blk: {
-                const peer_id = reply_target;
+                const peer_id = if (msg.is_group) reply_target else msg.sender;
                 const route = agent_routing.resolveRouteWithSession(allocator, .{
                     .channel = "max",
                     .account_id = mx_ptr.account_id,

@@ -107,6 +107,7 @@ pub const InboundCallback = struct {
     payload: []u8,
     sender: SenderInfo,
     chat_id: []u8,
+    is_group: bool = false,
 
     pub fn deinit(self: *const InboundCallback, allocator: std.mem.Allocator) void {
         allocator.free(self.callback_id);
@@ -326,10 +327,21 @@ fn parseMessageCallback(allocator: std.mem.Allocator, update_obj: std.json.Value
     errdefer sender.deinit(allocator);
 
     // chat_id from callback.message.recipient.chat_id
+    const callback_message = callback_val.object.get("message") orelse {
+        allocator.free(callback_id);
+        allocator.free(payload);
+        sender.deinit(allocator);
+        return null;
+    };
+    if (callback_message != .object) {
+        allocator.free(callback_id);
+        allocator.free(payload);
+        sender.deinit(allocator);
+        return null;
+    }
+
     const chat_id_str = blk: {
-        const msg_val = callback_val.object.get("message") orelse break :blk null;
-        if (msg_val != .object) break :blk null;
-        const recipient = msg_val.object.get("recipient") orelse break :blk null;
+        const recipient = callback_message.object.get("recipient") orelse break :blk null;
         if (recipient != .object) break :blk null;
         break :blk getStr(recipient, "chat_id");
     } orelse {
@@ -346,11 +358,19 @@ fn parseMessageCallback(allocator: std.mem.Allocator, update_obj: std.json.Value
         return null;
     };
 
+    const is_group = blk: {
+        const recipient = callback_message.object.get("recipient") orelse break :blk false;
+        if (recipient != .object) break :blk false;
+        const chat_type = getStr(recipient, "chat_type") orelse break :blk false;
+        break :blk std.mem.eql(u8, chat_type, "chat") or std.mem.eql(u8, chat_type, "channel");
+    };
+
     return .{ .callback = .{
         .callback_id = callback_id,
         .payload = payload,
         .sender = sender,
         .chat_id = chat_id,
+        .is_group = is_group,
     } };
 }
 
@@ -623,6 +643,24 @@ test "parseUpdate message_callback" {
     try std.testing.expectEqualStrings("42", cb.sender.user_id);
     try std.testing.expectEqualStrings("Alice", cb.sender.name.?);
     try std.testing.expectEqualStrings("100", cb.chat_id);
+    try std.testing.expect(!cb.is_group);
+}
+
+test "parseUpdate message_callback preserves group recipient type" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"update_type":"message_callback","callback_id":"cb-2",
+        \\"callback":{"payload":"opt2","user":{"user_id":"42","name":"Alice"},
+        \\"message":{"recipient":{"chat_id":"200","chat_type":"chat"}}}}
+    ;
+    const parsed = try parseTestJson(allocator, json);
+    defer parsed.deinit();
+
+    const update = parseUpdate(allocator, parsed.value) orelse return error.TestUnexpectedResult;
+    defer update.deinit(allocator);
+
+    try std.testing.expect(update == .callback);
+    try std.testing.expect(update.callback.is_group);
 }
 
 test "parseUpdate bot_started with payload" {
