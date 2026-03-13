@@ -273,6 +273,32 @@ pub const TelegramCommandsMenuMode = enum {
     scoped,
 };
 
+pub const MaxListenerMode = enum {
+    polling,
+    webhook,
+};
+
+pub const MaxInteractiveConfig = struct {
+    enabled: bool = false,
+    ttl_secs: u64 = 900,
+    owner_only: bool = true,
+};
+
+pub const MaxConfig = struct {
+    account_id: []const u8 = "default",
+    bot_token: []const u8,
+    allow_from: []const []const u8 = &.{},
+    group_allow_from: []const []const u8 = &.{},
+    group_policy: []const u8 = "allowlist",
+    proxy: ?[]const u8 = null,
+    mode: MaxListenerMode = .polling,
+    webhook_url: ?[]const u8 = null,
+    webhook_secret: ?[]const u8 = null,
+    interactive: MaxInteractiveConfig = .{},
+    require_mention: bool = false,
+    streaming: bool = true,
+};
+
 pub const TelegramConfig = struct {
     account_id: []const u8 = "default",
     bot_token: []const u8,
@@ -723,6 +749,7 @@ pub const ChannelsConfig = struct {
     onebot: []const OneBotConfig = &.{},
     maixcam: []const MaixCamConfig = &.{},
     web: []const WebConfig = &.{},
+    max: []const MaxConfig = &.{},
     nostr: ?*NostrConfig = null,
 
     fn primaryAccount(comptime T: type, items: []const T) ?T {
@@ -790,6 +817,9 @@ pub const ChannelsConfig = struct {
     }
     pub fn webPrimary(self: *const ChannelsConfig) ?WebConfig {
         return primaryAccount(WebConfig, self.web);
+    }
+    pub fn maxPrimary(self: *const ChannelsConfig) ?MaxConfig {
+        return primaryAccount(MaxConfig, self.max);
     }
 };
 
