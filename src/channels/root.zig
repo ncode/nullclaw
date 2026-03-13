@@ -186,6 +186,32 @@ else
             pub fn setBus(_: *@This(), _: anytype) void {}
         };
     };
+pub const max_api = @import("max_api.zig");
+pub const max = if (@import("build_options").enable_channel_max)
+    struct {
+        // Stub — full implementation in max.zig (Task 6).
+        pub const MaxChannel = struct {
+            pub fn initFromConfig(_: @import("std").mem.Allocator, _: anytype) @This() {
+                return .{};
+            }
+            pub fn channel(_: *@This()) Channel {
+                unreachable;
+            }
+            pub fn setBus(_: *@This(), _: anytype) void {}
+        };
+    }
+else
+    struct {
+        pub const MaxChannel = struct {
+            pub fn initFromConfig(_: @import("std").mem.Allocator, _: anytype) @This() {
+                return .{};
+            }
+            pub fn channel(_: *@This()) Channel {
+                unreachable;
+            }
+            pub fn setBus(_: *@This(), _: anytype) void {}
+        };
+    };
 pub const dispatch = @import("dispatch.zig");
 
 // ════════════════════════════════════════════════════════════════════════════
