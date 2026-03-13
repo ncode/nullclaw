@@ -21,14 +21,24 @@ zig version
 
 输出必须是 `0.15.2`。
 
-## 方式一：Homebrew（推荐，macOS/Linux）
+## 方式一：使用二进制文件
+### Homebrew（macOS/Linux推荐）
 
 ```bash
 brew install nullclaw
 nullclaw --help
 ```
-
 如果命令可用，说明安装成功。
+
+### 命令行（CMD）(Windows)
+
+直接将下载的nullclaw二进制文件（.exe)在命令行中作为命令执行即可，
+
+比如检查nullclaw版本号的命令如下：
+
+```cmd
+x:\path\nullclaw-xxx version
+```
 
 ## 方式二：官方容器镜像（Docker / Podman）
 
