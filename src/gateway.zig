@@ -3561,6 +3561,16 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     // Resolve the listen address
     const addr = try std.net.Address.resolveIp(host, port);
     const daemon_mode = event_bus != null;
+
+    // Best-effort probe to detect if the port is already in use.
+    // A TOCTOU gap exists between probe and listen(), but listen() will still
+    // fail with AddressInUse if another process binds the port in that window.
+    const probe_conn = std.net.tcpConnectToAddress(addr) catch null;
+    if (probe_conn) |conn| {
+        conn.close();
+        return error.AddressInUse;
+    }
+
     var server = try addr.listen(.{
         .reuse_address = true,
         // Daemon/service shutdown needs the accept loop to observe the shared
@@ -6139,4 +6149,20 @@ test "jsonWrapChallenge escapes malicious challenge value" {
     try std.testing.expectEqualStrings("abc\",\"evil\":\"true", challenge.string);
     // Must NOT have an "evil" key (injection prevented)
     try std.testing.expect(parsed.value.object.get("evil") == null);
+}
+
+// ── Port conflict detection tests ─────────────────────────────────────
+
+test "run returns AddressInUse when port is already bound" {
+    // Find an available port by binding to port 0
+    const test_addr = try std.net.Address.resolveIp("127.0.0.1", 0);
+    var listener = try test_addr.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    // Get the actual port that was assigned
+    const bound_port = listener.listen_address.in.getPort();
+
+    // Try to start gateway on the same port - should fail with AddressInUse
+    const result = run(std.testing.allocator, "127.0.0.1", bound_port, null, null);
+    try std.testing.expectError(error.AddressInUse, result);
 }

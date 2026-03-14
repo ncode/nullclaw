@@ -165,6 +165,16 @@ pub fn isShutdownRequested() bool {
 fn gatewayThread(allocator: std.mem.Allocator, config: *const Config, host: []const u8, port: u16, state: *DaemonState, event_bus: *bus_mod.Bus) void {
     const gateway = @import("gateway.zig");
     gateway.run(allocator, host, port, config, event_bus) catch |err| {
+        switch (err) {
+            error.AddressInUse => {
+                log.err("Gateway failed to start: port {d} is already in use. Is another nullclaw instance running?", .{port});
+                log.err("Shutting down daemon due to fatal gateway error.", .{});
+                requestShutdown();
+            },
+            else => {
+                log.err("Gateway failed to start: {}", .{err});
+            },
+        }
         state.markError("gateway", @errorName(err));
         health.markComponentError("gateway", @errorName(err));
         return;
@@ -446,6 +456,11 @@ fn channelSupervisorThread(
     channel_rt: ?*channel_loop.ChannelRuntime,
     event_bus: *bus_mod.Bus,
 ) void {
+    // Early exit if shutdown was requested (e.g., gateway port conflict)
+    if (isShutdownRequested()) {
+        return;
+    }
+
     var mgr = channel_manager.ChannelManager.init(allocator, config, channel_registry) catch {
         state.markError("channels", "init_failed");
         health.markComponentError("channels", "init_failed");
@@ -2331,4 +2346,13 @@ test "startConfiguredTunnel records create failure" {
     try std.testing.expectEqual(@as(u64, 1), state.components[0].?.restart_count);
     try std.testing.expectEqualStrings("MissingNgrokConfig", state.components[0].?.last_error.?);
     try std.testing.expect(state.tunnel_url == null);
+}
+
+test "markError records AddressInUse for gateway component" {
+    var state = DaemonState{};
+    state.addComponent("gateway");
+    state.markError("gateway", "AddressInUse");
+    try std.testing.expect(!state.components[0].?.running);
+    try std.testing.expectEqual(@as(u64, 1), state.components[0].?.restart_count);
+    try std.testing.expectEqualStrings("AddressInUse", state.components[0].?.last_error.?);
 }
