@@ -60,7 +60,7 @@ pub const CallbackSelection = union(enum) {
 
 var shared_interactions_mu: std.Thread.Mutex = .{};
 var shared_interactions: std.StringHashMapUnmanaged(PendingInteraction) = .empty;
-var shared_interaction_seq: std.atomic.Value(u64) = std.atomic.Value(u64).init(1);
+var shared_interaction_seq: std.atomic.Value(u32) = std.atomic.Value(u32).init(1);
 
 fn sharedInteractionsAllocator() std.mem.Allocator {
     return if (builtin.is_test) std.testing.allocator else std.heap.page_allocator;
