@@ -39,6 +39,8 @@ pub fn extractHost(url: []const u8) ?[]const u8 {
 pub fn hostMatchesAllowlist(host: []const u8, allowed: []const []const u8) bool {
     if (allowed.len == 0) return true; // empty allowlist = allow all
     for (allowed) |pattern| {
+        // Global wildcard: "*" matches any host
+        if (std.mem.eql(u8, pattern, "*")) return true;
         // Exact match
         if (std.mem.eql(u8, host, pattern)) return true;
         // Wildcard subdomain: "*.example.com" matches "api.example.com"
@@ -253,7 +255,7 @@ pub fn hostResolvesToLocal(allocator: std.mem.Allocator, host: []const u8, port:
     return false;
 }
 
-fn stripHostBrackets(host: []const u8) []const u8 {
+pub fn stripHostBrackets(host: []const u8) []const u8 {
     if (std.mem.startsWith(u8, host, "[") and std.mem.endsWith(u8, host, "]")) {
         return host[1 .. host.len - 1];
     }
@@ -531,6 +533,11 @@ test "extractHost handles query and fragment" {
     try std.testing.expectEqualStrings("example.com", extractHost("https://example.com?q=1").?);
     try std.testing.expectEqualStrings("example.com", extractHost("https://example.com#frag").?);
     try std.testing.expectEqualStrings("example.com", extractHost("https://example.com/path?q=1#frag").?);
+}
+
+test "stripHostBrackets removes surrounding brackets only" {
+    try std.testing.expectEqualStrings("::1", stripHostBrackets("[::1]"));
+    try std.testing.expectEqualStrings("example.com", stripHostBrackets("example.com"));
 }
 
 test "isLocalHost detects localhost" {

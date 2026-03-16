@@ -10,6 +10,7 @@ const RetrievalCandidate = retrieval.RetrievalCandidate;
 const RetrievalSourceAdapter = retrieval.RetrievalSourceAdapter;
 const SourceCapabilities = retrieval.SourceCapabilities;
 const config_types = @import("../../config_types.zig");
+const fs_compat = @import("../../fs_compat.zig");
 const process_util = @import("../../tools/process_util.zig");
 const root = @import("../root.zig");
 const log = std.log.scoped(.qmd);
@@ -252,7 +253,10 @@ pub const QmdAdapter = struct {
             content.appendSlice(allocator, sid) catch continue;
             content.appendSlice(allocator, "\n\n") catch continue;
 
+            var wrote_visible_message = false;
             for (messages) |msg| {
+                if (root.isRuntimeCommandRole(msg.role)) continue;
+                wrote_visible_message = true;
                 const label: []const u8 = if (std.mem.eql(u8, msg.role, "user"))
                     "**User**"
                 else if (std.mem.eql(u8, msg.role, "assistant"))
@@ -264,6 +268,7 @@ pub const QmdAdapter = struct {
                 content.appendSlice(allocator, msg.content) catch continue;
                 content.appendSlice(allocator, "\n\n") catch continue;
             }
+            if (!wrote_visible_message) continue;
 
             // Compute hash of new content
             const new_hash = std.hash.Fnv1a_32.hash(content.items);
@@ -276,7 +281,7 @@ pub const QmdAdapter = struct {
 
             // Check if existing file has same content hash (skip redundant writes)
             const skip = blk: {
-                const existing = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch break :blk false;
+                const existing = fs_compat.readFileAlloc(std.fs.cwd(), allocator, file_path, 1024 * 1024) catch break :blk false;
                 defer allocator.free(existing);
                 break :blk std.hash.Fnv1a_32.hash(existing) == new_hash;
             };
@@ -510,9 +515,10 @@ const MockSessionStore = struct {
     fn implLoadMessages(ptr: *anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![]root.MessageEntry {
         const self: *MockSessionStore = @ptrCast(@alignCast(ptr));
         self.call_count += 1;
-        var msgs = try allocator.alloc(root.MessageEntry, 2);
+        var msgs = try allocator.alloc(root.MessageEntry, 3);
         msgs[0] = .{ .role = try allocator.dupe(u8, "user"), .content = try allocator.dupe(u8, "Hello") };
-        msgs[1] = .{ .role = try allocator.dupe(u8, "assistant"), .content = try allocator.dupe(u8, "Hi there") };
+        msgs[1] = .{ .role = try allocator.dupe(u8, root.RUNTIME_COMMAND_ROLE), .content = try allocator.dupe(u8, "/usage full") };
+        msgs[2] = .{ .role = try allocator.dupe(u8, "assistant"), .content = try allocator.dupe(u8, "Hi there") };
         return msgs;
     }
     fn implClearMessages(_: *anyopaque, _: []const u8) anyerror!void {}
@@ -550,11 +556,12 @@ test "exportSessions with mock session store writes files" {
     try std.testing.expect(mock.call_count >= 1);
 
     // Verify file was created
-    const content = try tmp.dir.readFileAlloc(allocator, "session-1.md", 4096);
+    const content = try fs_compat.readFileAlloc(tmp.dir, allocator, "session-1.md", 4096);
     defer allocator.free(content);
     try std.testing.expect(std.mem.indexOf(u8, content, "Session: session-1") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "**User**: Hello") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "**Assistant**: Hi there") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, root.RUNTIME_COMMAND_ROLE) == null);
 }
 
 test "exportSessions skips unchanged files (hash check)" {

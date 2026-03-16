@@ -25,7 +25,7 @@ Key extension points:
 - `src/runtime.zig` (`RuntimeAdapter`) — execution environments
 - `src/peripherals.zig` (`Peripheral`) — hardware boards (Arduino, STM32, RPi)
 
-Current scale: **151 source files, ~96K lines of code, 3,371 tests**.
+Current scale: **245 source files, ~204K lines of code, 5,640+ tests**.
 
 Build and test:
 
@@ -61,7 +61,7 @@ These codebase realities should drive every design decision:
    - SQLite: linked via `/opt/homebrew/opt/sqlite/{lib,include}` on the compile step, not the module.
    - `ArrayListUnmanaged`: init with `.empty`, pass allocator to every method.
 
-5. **All 3,371+ tests must pass at zero leaks**
+5. **All 5,640+ tests must pass at zero leaks**
    - The test suite uses `std.testing.allocator` (leak-detecting GPA). Every allocation must be freed.
    - `Config.load()` allocates — always wrap in `std.heap.ArenaAllocator` in tests and production.
    - `ChaCha20Poly1305.decrypt` segfaults on tag failure with heap-allocated output on macOS/Zig 0.15 — use a stack buffer then `allocator.dupe()`.
@@ -158,12 +158,15 @@ When uncertain, classify as higher risk.
 
 Apply these naming rules consistently:
 
-- All identifiers: `snake_case` for functions, variables, fields, modules, files.
-- Types, structs, enums, unions: `PascalCase` (e.g., `AnthropicProvider`, `BrowserTool`).
-- Constants and comptime values: `SCREAMING_SNAKE_CASE` or `PascalCase` depending on context.
+- Functions and methods: `camelCase` (e.g., `parseCommand`, `buildSimpleRequestBody`, `healthCheck`). This follows standard Zig convention.
+- Variables, fields, modules, files: `snake_case` (e.g., `workspace_dir`, `bot_user_id`, `config_parse.zig`).
+- Types, structs, enums, unions: `PascalCase` (e.g., `AnthropicProvider`, `BrowserTool`, `CommandRiskLevel`).
+- Value constants (numeric limits, URLs, timeouts): `SCREAMING_SNAKE_CASE` (e.g., `MAX_BODY_SIZE`, `DEFAULT_BASE_URL`, `KEY_LEN`).
+- Comptime array/table constants: `snake_case` (e.g., `high_risk_commands`, `compat_providers`, `default_allowed_commands`).
 - Vtable implementer naming: `<Name>Provider`, `<Name>Channel`, `<Name>Tool`, `<Name>Memory`, `<Name>Sandbox`.
-- Factory registration keys: stable, lowercase, user-facing (e.g., `"openai"`, `"telegram"`, `"shell"`).
-- Tests: named by behavior (`subject_expected_behavior`), fixtures use neutral names.
+- Vtable function-pointer fields: `camelCase` for new vtables (e.g., `chatWithSystem`, `supportsNativeTools`, `getName`). Note: some older vtable fields use `snake_case` (`supports_streaming`, `record_event`); prefer `camelCase` for new additions and consolidate over time.
+- Factory registration keys: stable, lowercase, user-facing (e.g., `"openai"`, `"telegram"`, `"shell"`). Use hyphens for multi-word keys (e.g., `"together-ai"`, `"aws-bedrock"`).
+- Tests: named with space-separated descriptive phrases as the test block string (e.g., `"command risk low for read commands"`, `"pushover execute missing message"`). Prefix with the subject or subsystem when helpful. Fixtures use neutral names.
 
 ### 6.2 Architecture Boundary Contract (Required)
 
@@ -220,6 +223,8 @@ For release changes:
 ```bash
 zig build -Doptimize=ReleaseSmall  # must compile clean
 ```
+
+Before any version bump, release branch, or tag work: read `RELEASING.md` and follow it exactly. Do not tag feature branches.
 
 Additional expectations by change type:
 

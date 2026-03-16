@@ -1,4 +1,6 @@
 const std = @import("std");
+const search_base_url = @import("search_base_url.zig");
+const tunnel_mod = @import("tunnel.zig");
 
 /// Default context token budget used by agent compaction/context management.
 /// Runtime fallback (`DEFAULT_CONTEXT_TOKENS`).
@@ -36,6 +38,10 @@ pub const SandboxBackend = enum {
 
 pub const ProviderEntry = struct {
     name: []const u8,
+    /// Provider credential payload.
+    /// Usually a string API key/token.
+    /// For providers that support structured credentials (e.g. Vertex service-account JSON),
+    /// the parser accepts object/array JSON and stores it as a compact JSON string.
     api_key: ?[]const u8 = null,
     base_url: ?[]const u8 = null,
     /// Whether this provider supports native OpenAI-style tool_calls.
@@ -95,6 +101,9 @@ pub const AutonomyConfig = struct {
     require_approval_for_medium_risk: bool = true,
     block_high_risk_commands: bool = true,
     allowed_commands: []const []const u8 = &.{},
+    /// When true, skip the single-`&` shell-operator check so that bare
+    /// `&` in URLs (e.g. `curl https://...?a=1&b=2`) is permitted.
+    allow_raw_url_chars: bool = false,
     /// Additional directories (absolute paths) the agent may access beyond workspace_dir.
     /// Resolved via realpath at check time; system-critical paths are always blocked.
     allowed_paths: []const []const u8 = &.{},
@@ -139,6 +148,32 @@ pub const SchedulerConfig = struct {
     agent_timeout_secs: u64 = 0,
 };
 
+// ── Tool filter groups ──────────────────────────────────────────
+
+/// Controls which MCP tools are included in the schema sent to the LLM each turn.
+///
+/// Two modes:
+///   - `always`:  tools matching `tools` patterns are always included (no keywords needed).
+///   - `dynamic`: tools matching `tools` patterns are included only when the user message
+///                contains at least one of the `keywords` (case-insensitive substring match).
+///
+/// Built-in (non-MCP) tools are always included regardless of filter groups.
+/// If no filter groups are configured, all tools pass through unchanged.
+pub const ToolFilterGroupMode = enum {
+    always,
+    dynamic,
+};
+
+pub const ToolFilterGroup = struct {
+    mode: ToolFilterGroupMode,
+    /// Glob patterns matched against tool names (e.g. "mcp_vikunja_*").
+    /// Supports `*` wildcard only (prefix/suffix/infix).
+    tools: []const []const u8 = &.{},
+    /// Keywords for `dynamic` mode — case-insensitive substring match against user message.
+    /// Ignored when mode is `always`.
+    keywords: []const []const u8 = &.{},
+};
+
 pub const AgentConfig = struct {
     compact_context: bool = false,
     max_tool_iterations: u32 = 1000,
@@ -157,6 +192,16 @@ pub const AgentConfig = struct {
     status_show_emojis: bool = true,
     /// Max seconds to wait for an LLM HTTP response (curl --max-time). 0 = no limit.
     message_timeout_secs: u64 = 600,
+    /// Per-turn MCP tool filtering. Empty slice = no filtering (all tools included).
+    /// See ToolFilterGroup for semantics.
+    tool_filter_groups: []const ToolFilterGroup = &.{},
+    /// List of models that do not support image/vision input.
+    /// When image markers are detected and the model is in this list,
+    /// the agent will skip processing images instead of returning an error.
+    vision_disabled_models: []const []const u8 = &.{},
+    /// When true, automatically adds the current model to vision_disabled_models
+    /// upon receiving a "model does not support vision" error.
+    auto_disable_vision_on_error: bool = true,
 };
 
 pub const ToolsConfig = struct {
@@ -164,6 +209,27 @@ pub const ToolsConfig = struct {
     shell_max_output_bytes: u32 = 1_048_576, // 1MB
     max_file_size_bytes: u32 = 10_485_760, // 10MB — shared file_read/edit/append
     web_fetch_max_chars: u32 = 100_000,
+    /// Environment variables whose values are platform path-list strings.
+    /// Each path component is validated against workspace + allowed_paths
+    /// using the same sandbox rules as file access (system blocklist,
+    /// realpath canonicalization). Only vars where ALL path components
+    /// resolve within allowed areas are passed to shell child processes.
+    ///
+    /// Example: ["LD_LIBRARY_PATH", "PYTHONHOME", "NODE_PATH"]
+    path_env_vars: []const []const u8 = &.{},
+};
+
+pub const ModelRouteCostClass = enum {
+    free,
+    cheap,
+    standard,
+    premium,
+};
+
+pub const ModelRouteQuotaClass = enum {
+    unlimited,
+    normal,
+    constrained,
 };
 
 pub const ModelRouteConfig = struct {
@@ -171,6 +237,8 @@ pub const ModelRouteConfig = struct {
     provider: []const u8,
     model: []const u8,
     api_key: ?[]const u8 = null,
+    cost_class: ModelRouteCostClass = .standard,
+    quota_class: ModelRouteQuotaClass = .normal,
 };
 
 pub const HeartbeatConfig = struct {
@@ -193,6 +261,45 @@ pub const TelegramInteractiveConfig = struct {
     remove_on_click: bool = true,
 };
 
+pub const TelegramReactionEmojisConfig = struct {
+    accepted: []const u8 = "👀",
+    running: []const u8 = "⚡",
+    done: []const u8 = "👍",
+    failed: []const u8 = "💔",
+};
+
+pub const TelegramCommandsMenuMode = enum {
+    off,
+    flat,
+    scoped,
+};
+
+pub const MaxListenerMode = enum {
+    polling,
+    webhook,
+};
+
+pub const MaxInteractiveConfig = struct {
+    enabled: bool = false,
+    ttl_secs: u64 = 900,
+    owner_only: bool = true,
+};
+
+pub const MaxConfig = struct {
+    account_id: []const u8 = "default",
+    bot_token: []const u8,
+    allow_from: []const []const u8 = &.{},
+    group_allow_from: []const []const u8 = &.{},
+    group_policy: []const u8 = "allowlist",
+    proxy: ?[]const u8 = null,
+    mode: MaxListenerMode = .polling,
+    webhook_url: ?[]const u8 = null,
+    webhook_secret: ?[]const u8 = null,
+    interactive: MaxInteractiveConfig = .{},
+    require_mention: bool = false,
+    streaming: bool = true,
+};
+
 pub const TelegramConfig = struct {
     account_id: []const u8 = "default",
     bot_token: []const u8,
@@ -206,6 +313,21 @@ pub const TelegramConfig = struct {
     interactive: TelegramInteractiveConfig = .{},
     /// When true, only respond to messages that @mention the bot (in groups).
     require_mention: bool = false,
+    /// Stream partial responses to users via sendMessageDraft before the final message.
+    streaming: bool = true,
+    /// Show task lifecycle on the triggering user message via Telegram reactions.
+    status_reactions: bool = false,
+    /// Per-state reaction emoji overrides. Empty string clears the reaction for that state.
+    reaction_emojis: TelegramReactionEmojisConfig = .{},
+    /// Enable Telegram-specific binding commands such as /bind.
+    binding_commands_enabled: bool = true,
+    /// Enable Telegram-specific topic management commands such as /topic.
+    topic_commands_enabled: bool = true,
+    /// Enable Telegram-specific topic/session map command such as /topics.
+    topic_map_command_enabled: bool = true,
+    /// Publish Telegram slash-command menu:
+    /// off = clear it, flat = one global list, scoped = separate private/group menus.
+    commands_menu_mode: TelegramCommandsMenuMode = .flat,
 };
 
 pub const DiscordConfig = struct {
@@ -223,6 +345,14 @@ pub const SlackReceiveMode = enum {
     http,
 };
 
+pub const SlackReplyToMode = enum {
+    /// Only thread when the triggering message is already a thread reply
+    /// (thread_ts present and differs from ts). Default.
+    off,
+    /// Always reply in a thread, using thread_ts if present or message ts otherwise.
+    all,
+};
+
 pub const SlackConfig = struct {
     account_id: []const u8 = "default",
     mode: SlackReceiveMode = .socket,
@@ -234,6 +364,18 @@ pub const SlackConfig = struct {
     allow_from: []const []const u8 = &.{},
     dm_policy: []const u8 = "pairing",
     group_policy: []const u8 = "mention_only",
+    reply_to_mode: SlackReplyToMode = .off,
+};
+
+pub const TeamsConfig = struct {
+    account_id: []const u8 = "default",
+    client_id: []const u8,
+    client_secret: []const u8,
+    tenant_id: []const u8,
+    webhook_secret: ?[]const u8 = null,
+    notification_channel_id: ?[]const u8 = null,
+    bot_id: ?[]const u8 = null,
+    config_dir: []const u8 = ".",
 };
 
 pub const WebhookConfig = struct {
@@ -291,13 +433,20 @@ pub const WhatsAppWebConfig = struct {
     /// HTTP bridge endpoint used by the WhatsApp Web sidecar.
     /// Example: http://127.0.0.1:3301
     bridge_url: []const u8 = "http://127.0.0.1:3301",
-    /// Optional bearer token sent to the sidecar bridge.
+    /// Optional bearer token sent to the sidecar for API authentication.
     api_key: ?[]const u8 = null,
     allow_from: []const []const u8 = &.{},
     group_allow_from: []const []const u8 = &.{},
-    /// Supported values: "allowlist", "open", "disabled".
-    group_policy: []const u8 = "allowlist",
-    poll_interval_ms: u32 = 1500,
+
+    pub fn deinit(self: *const WhatsAppWebConfig, allocator: std.mem.Allocator) void {
+        allocator.free(self.account_id);
+        allocator.free(self.bridge_url);
+        if (self.api_key) |k| allocator.free(k);
+        for (self.allow_from) |a| allocator.free(a);
+        allocator.free(self.allow_from);
+        for (self.group_allow_from) |a| allocator.free(a);
+        allocator.free(self.group_allow_from);
+    }
 };
 
 pub const IrcConfig = struct {
@@ -336,6 +485,8 @@ pub const DingTalkConfig = struct {
     client_id: []const u8,
     client_secret: []const u8,
     allow_from: []const []const u8 = &.{},
+    ai_card_template_id: ?[]const u8 = null,
+    ai_card_streaming_key: ?[]const u8 = null,
 };
 
 pub const SignalConfig = struct {
@@ -415,6 +566,7 @@ pub const WebConfig = struct {
     pub const DEFAULT_PATH: []const u8 = "/ws";
     pub const DEFAULT_TRANSPORT: []const u8 = "local";
     pub const DEFAULT_MESSAGE_AUTH_MODE: []const u8 = "pairing";
+    pub const DEFAULT_MAX_HANDSHAKE_SIZE: u16 = 8_192;
     pub const MIN_AUTH_TOKEN_LEN: usize = 16;
     pub const MAX_AUTH_TOKEN_LEN: usize = 128;
     pub const MAX_RELAY_AGENT_ID_LEN: usize = 64;
@@ -433,6 +585,9 @@ pub const WebConfig = struct {
     listen: []const u8 = "127.0.0.1",
     path: []const u8 = DEFAULT_PATH,
     max_connections: u16 = 10,
+    /// Max bytes allowed for the HTTP upgrade request headers during WS handshake.
+    /// Increase this when running behind reverse proxies that append many headers.
+    max_handshake_size: u16 = DEFAULT_MAX_HANDSHAKE_SIZE,
     /// Optional WebSocket-upgrade auth token for browser/extension clients.
     /// Used for WebSocket-upgrade hardening and for `message_auth_mode="token"`.
     /// If null, WebChannel falls back to env (NULLCLAW_WEB_TOKEN/NULLCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_TOKEN),
@@ -624,6 +779,7 @@ pub const ChannelsConfig = struct {
     mattermost: []const MattermostConfig = &.{},
     whatsapp: []const WhatsAppConfig = &.{},
     whatsapp_web: []const WhatsAppWebConfig = &.{},
+    teams: []const TeamsConfig = &.{},
     irc: []const IrcConfig = &.{},
     lark: []const LarkConfig = &.{},
     dingtalk: []const DingTalkConfig = &.{},
@@ -634,6 +790,7 @@ pub const ChannelsConfig = struct {
     onebot: []const OneBotConfig = &.{},
     maixcam: []const MaixCamConfig = &.{},
     web: []const WebConfig = &.{},
+    max: []const MaxConfig = &.{},
     nostr: ?*NostrConfig = null,
 
     fn primaryAccount(comptime T: type, items: []const T) ?T {
@@ -678,6 +835,9 @@ pub const ChannelsConfig = struct {
     pub fn whatsappWebPrimary(self: *const ChannelsConfig) ?WhatsAppWebConfig {
         return primaryAccount(WhatsAppWebConfig, self.whatsapp_web);
     }
+    pub fn teamsPrimary(self: *const ChannelsConfig) ?TeamsConfig {
+        return primaryAccount(TeamsConfig, self.teams);
+    }
     pub fn ircPrimary(self: *const ChannelsConfig) ?IrcConfig {
         return primaryAccount(IrcConfig, self.irc);
     }
@@ -705,12 +865,17 @@ pub const ChannelsConfig = struct {
     pub fn webPrimary(self: *const ChannelsConfig) ?WebConfig {
         return primaryAccount(WebConfig, self.web);
     }
+    pub fn maxPrimary(self: *const ChannelsConfig) ?MaxConfig {
+        return primaryAccount(MaxConfig, self.max);
+    }
 };
 
 // ── Memory config ───────────────────────────────────────────────
 
 /// Memory configuration profile presets.
 pub const MemoryProfile = enum {
+    /// Hybrid: SQLite backend with workspace bootstrap files.
+    hybrid_keyword,
     /// SQLite keyword-only (default).
     local_keyword,
     /// File-based markdown memory.
@@ -727,6 +892,7 @@ pub const MemoryProfile = enum {
     custom,
 
     pub fn fromString(s: []const u8) MemoryProfile {
+        if (std.mem.eql(u8, s, "hybrid_keyword")) return .hybrid_keyword;
         if (std.mem.eql(u8, s, "local_keyword")) return .local_keyword;
         if (std.mem.eql(u8, s, "markdown_only")) return .markdown_only;
         if (std.mem.eql(u8, s, "postgres_keyword")) return .postgres_keyword;
@@ -738,11 +904,12 @@ pub const MemoryProfile = enum {
 };
 
 pub const MemoryConfig = struct {
-    pub const DEFAULT_MEMORY_BACKEND: []const u8 = "markdown";
+    pub const DEFAULT_MEMORY_BACKEND: []const u8 = "hybrid";
 
     /// Profile preset — convenience shortcut for common setups.
-    profile: []const u8 = "markdown_only",
+    profile: []const u8 = "hybrid_keyword",
     backend: []const u8 = DEFAULT_MEMORY_BACKEND,
+    instance_id: []const u8 = "",
     auto_save: bool = true,
     citations: []const u8 = "auto",
     search: MemorySearchConfig = .{},
@@ -753,6 +920,7 @@ pub const MemoryConfig = struct {
     postgres: MemoryPostgresConfig = .{},
     redis: MemoryRedisConfig = .{},
     api: MemoryApiConfig = .{},
+    clickhouse: MemoryClickHouseConfig = .{},
     retrieval_stages: MemoryRetrievalStagesConfig = .{},
     summarizer: MemorySummarizerConfig = .{},
 
@@ -761,6 +929,9 @@ pub const MemoryConfig = struct {
     pub fn applyProfileDefaults(self: *MemoryConfig) void {
         const p = MemoryProfile.fromString(self.profile);
         switch (p) {
+            .hybrid_keyword => {
+                // Base default is already hybrid.
+            },
             .local_keyword => {
                 if (std.mem.eql(u8, self.backend, DEFAULT_MEMORY_BACKEND)) self.backend = "sqlite";
             },
@@ -917,6 +1088,7 @@ pub const MemoryLifecycleConfig = struct {
     hygiene_enabled: bool = true,
     archive_after_days: u32 = 7,
     purge_after_days: u32 = 30,
+    preserve_before_purge: bool = true,
     conversation_retention_days: u32 = 30,
     snapshot_enabled: bool = false,
     snapshot_on_hygiene: bool = false,
@@ -964,6 +1136,17 @@ pub const MemoryApiConfig = struct {
     namespace: []const u8 = "",
 };
 
+pub const MemoryClickHouseConfig = struct {
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 8123,
+    database: []const u8 = "default",
+    table: []const u8 = "memories",
+    user: []const u8 = "",
+    password: []const u8 = "",
+    /// Plain HTTP is accepted only for loopback hosts; remote endpoints must use HTTPS.
+    use_https: bool = false,
+};
+
 pub const MemoryRetrievalStagesConfig = struct {
     query_expansion_enabled: bool = false,
     adaptive_retrieval_enabled: bool = false,
@@ -983,9 +1166,13 @@ pub const MemorySummarizerConfig = struct {
 
 // ── Tunnel config ───────────────────────────────────────────────
 
-pub const TunnelConfig = struct {
-    provider: []const u8 = "none",
-};
+// Re-export tunnel config types from tunnel.zig so config parsing stays
+// aligned with the runtime tunnel factory shape.
+pub const CloudflareTunnelConfig = tunnel_mod.CloudflareTunnelConfig;
+pub const TailscaleTunnelConfig = tunnel_mod.TailscaleTunnelConfig;
+pub const NgrokTunnelConfig = tunnel_mod.NgrokTunnelConfig;
+pub const CustomTunnelConfig = tunnel_mod.CustomTunnelConfig;
+pub const TunnelConfig = tunnel_mod.TunnelFullConfig;
 
 // ── Gateway config ──────────────────────────────────────────────
 
@@ -998,6 +1185,16 @@ pub const GatewayConfig = struct {
     webhook_rate_limit_per_minute: u32 = 60,
     idempotency_ttl_secs: u64 = 300,
     paired_tokens: []const []const u8 = &.{},
+};
+
+// ── A2A (Agent-to-Agent) protocol config ────────────────────────
+
+pub const A2aConfig = struct {
+    enabled: bool = false,
+    name: []const u8 = "NullClaw",
+    description: []const u8 = "AI assistant",
+    url: []const u8 = "",
+    version: []const u8 = "1.0.0",
 };
 
 // ── Composio config ─────────────────────────────────────────────
@@ -1048,8 +1245,11 @@ pub const HttpRequestConfig = struct {
     proxy: ?[]const u8 = null,
     /// Optional SearXNG instance URL used by web_search as a fallback when
     /// BRAVE_API_KEY is not available.
+    /// HTTPS is allowed for any host. Plain HTTP is allowed only for local or
+    /// private hosts such as localhost, .local names, or private IP ranges.
     /// Examples:
     ///   - "https://searx.example.com"
+    ///   - "http://localhost:8888"
     ///   - "https://searx.example.com/search"
     search_base_url: ?[]const u8 = null,
     /// Search provider for web_search.
@@ -1062,31 +1262,11 @@ pub const HttpRequestConfig = struct {
     /// Validate optional SearXNG base URL accepted by web_search.
     /// Allowed forms:
     ///   - https://host
-    ///   - https://host/
     ///   - https://host/search
-    ///   - https://host/search/
+    ///   - http://localhost[:port]
+    ///   - http://localhost[:port]/search
     pub fn isValidSearchBaseUrl(raw: []const u8) bool {
-        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-        if (!std.mem.startsWith(u8, trimmed, "https://")) return false;
-        if (std.mem.indexOfAny(u8, trimmed, "?#") != null) return false;
-
-        const no_scheme = trimmed["https://".len..];
-        if (no_scheme.len == 0 or no_scheme[0] == '/') return false;
-
-        const slash_pos = std.mem.indexOfScalar(u8, no_scheme, '/');
-        const authority = if (slash_pos) |idx| no_scheme[0..idx] else no_scheme;
-        if (authority.len == 0) return false;
-        if (std.mem.indexOfAny(u8, authority, " \t\r\n")) |_| return false;
-
-        if (slash_pos) |idx| {
-            var path = no_scheme[idx..];
-            if (std.mem.eql(u8, path, "/")) return true;
-            while (path.len > 1 and path[path.len - 1] == '/') {
-                path = path[0 .. path.len - 1];
-            }
-            if (!std.mem.eql(u8, path, "/search")) return false;
-        }
-        return true;
+        return search_base_url.isValid(raw);
     }
 
     pub fn isValidSearchProviderName(raw: []const u8) bool {
@@ -1246,7 +1426,10 @@ pub const NamedAgentConfig = struct {
     name: []const u8,
     provider: []const u8,
     model: []const u8,
+    workspace: ?[]const u8 = null,
     system_prompt: ?[]const u8 = null,
+    /// Runtime-only source path preserved so Config.save() can round-trip file-backed prompts.
+    system_prompt_path: ?[]const u8 = null,
     api_key: ?[]const u8 = null,
     temperature: ?f64 = null,
     max_depth: u32 = 3,
@@ -1311,6 +1494,7 @@ test "WebConfig defaults" {
     try std.testing.expectEqualStrings("127.0.0.1", cfg.listen);
     try std.testing.expectEqualStrings(WebConfig.DEFAULT_PATH, cfg.path);
     try std.testing.expectEqual(@as(u16, 10), cfg.max_connections);
+    try std.testing.expectEqual(WebConfig.DEFAULT_MAX_HANDSHAKE_SIZE, cfg.max_handshake_size);
     try std.testing.expect(cfg.auth_token == null);
     try std.testing.expectEqualStrings(WebConfig.DEFAULT_MESSAGE_AUTH_MODE, cfg.message_auth_mode);
     try std.testing.expectEqual(@as(usize, 0), cfg.allowed_origins.len);
@@ -1333,6 +1517,7 @@ test "security defaults stay least-privilege" {
     try std.testing.expectEqual(@as(u32, 20), autonomy.max_actions_per_hour);
     try std.testing.expect(autonomy.require_approval_for_medium_risk);
     try std.testing.expect(autonomy.block_high_risk_commands);
+    try std.testing.expect(!autonomy.allow_raw_url_chars);
 
     const http_request = HttpRequestConfig{};
     try std.testing.expect(!http_request.enabled);
@@ -1435,11 +1620,22 @@ test "HttpRequestConfig search base URL validation" {
     try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("https://searx.example.com/search"));
     try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("https://searx.example.com/search/"));
 
-    try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("http://searx.example.com"));
+    try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://localhost:8888"));
+    try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://localhost:8888/"));
+    try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://localhost:8888/search"));
+    try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://localhost:8888/search/"));
+    try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://192.168.1.10:8888/search"));
+    try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://searx.local/search"));
+
+    try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("ftp://searx.example.com"));
     try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("https://"));
+    try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("http://"));
+    try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("http://searx.example.com"));
+    try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("http://searx.example.com/search"));
     try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("https://searx.example.com?x=1"));
     try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("https://searx.example.com#frag"));
     try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("https://searx.example.com/custom"));
+    try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("https://:8080/search"));
 }
 
 test "HttpRequestConfig search provider validation" {
