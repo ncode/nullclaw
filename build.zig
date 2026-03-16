@@ -357,19 +357,13 @@ fn ensureAndroidBuildEnvironment(b: *std.Build) void {
     std.process.exit(1);
 }
 
-fn addEmbeddedWasm3(module: *std.Build.Module, b: *std.Build) void {
-    module.addIncludePath(b.path("vendor/wasm3/source"));
-
-    module.addCSourceFile(.{ .file = b.path("vendor/wasm3/source/m3_bind.c") });
-    module.addCSourceFile(.{ .file = b.path("vendor/wasm3/source/m3_code.c") });
-    module.addCSourceFile(.{ .file = b.path("vendor/wasm3/source/m3_compile.c") });
-    module.addCSourceFile(.{ .file = b.path("vendor/wasm3/source/m3_core.c") });
-    module.addCSourceFile(.{ .file = b.path("vendor/wasm3/source/m3_env.c") });
-    module.addCSourceFile(.{ .file = b.path("vendor/wasm3/source/m3_exec.c") });
-    module.addCSourceFile(.{ .file = b.path("vendor/wasm3/source/m3_function.c") });
-    module.addCSourceFile(.{ .file = b.path("vendor/wasm3/source/m3_info.c") });
-    module.addCSourceFile(.{ .file = b.path("vendor/wasm3/source/m3_module.c") });
-    module.addCSourceFile(.{ .file = b.path("vendor/wasm3/source/m3_parse.c") });
+fn addEmbeddedWasm3(module: *std.Build.Module, b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const wasm3_dep = b.dependency("wasm3", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    module.addIncludePath(wasm3_dep.path("source"));
+    module.linkLibrary(wasm3_dep.artifact("wasm3"));
 }
 
 pub fn build(b: *std.Build) void {
@@ -520,7 +514,7 @@ pub fn build(b: *std.Build) void {
             module.addImport("websocket", ws_dep.module("websocket"));
         }
         if (enable_embedded_wasm3) {
-            addEmbeddedWasm3(module, b);
+            addEmbeddedWasm3(module, b, target, optimize);
         }
         break :blk module;
     };

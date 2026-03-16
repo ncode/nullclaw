@@ -4,5 +4,11 @@
     "url": "git+https://github.com/karlseguin/websocket.zig#97fefafa59cc78ce177cff540b8685cd7f699276",
     "hash": "sha256-6fGZphAT4/MnEHjjqzUx/oUa07TBvLPl/58pyHHwq+M=",
     "rev": "97fefafa59cc78ce177cff540b8685cd7f699276"
+  },
+  "wasm3-0.5.1-hrMdNS09BQAWSU0TI6mVS8KfW4hxexjFvyOQINgphwKu": {
+    "name": "wasm3",
+    "url": "git+https://github.com/nullclaw/wasm3#8a29b0080f1f65dbbe8b8f8c4d8148480feff377",
+    "hash": "sha256-np4DFGYqKd+IHbZnZzPfZdlKlvVJ9HMJGVUJp8PQ+C4=",
+    "rev": "8a29b0080f1f65dbbe8b8f8c4d8148480feff377"
   }
 }
