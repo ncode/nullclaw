@@ -105,6 +105,9 @@ const compat_providers = [_]CompatProvider{
     .{ .name = "doubao", .url = "https://ark.cn-beijing.volces.com/api/v3", .display = "Doubao" },
     .{ .name = "volcengine", .url = "https://ark.cn-beijing.volces.com/api/v3", .display = "Doubao" },
     .{ .name = "ark", .url = "https://ark.cn-beijing.volces.com/api/v3", .display = "Doubao" },
+    .{ .name = "hunyuan", .url = "https://api.hunyuan.cloud.tencent.com/v1", .display = "Hunyuan" },
+    .{ .name = "tencent", .url = "https://api.hunyuan.cloud.tencent.com/v1", .display = "Hunyuan" },
+    .{ .name = "baichuan", .url = "https://api.baichuan-ai.com/v1", .display = "Baichuan" },
 
     // ── China Providers — CN endpoints ────────────────────────────────────
     .{ .name = "moonshot-cn", .url = "https://api.moonshot.cn/v1", .display = "Moonshot" },
@@ -546,6 +549,11 @@ test "compatibleProviderUrl CN/intl variants" {
     try std.testing.expectEqualStrings("https://api.z.ai/api/paas/v4", compatibleProviderUrl("glm-global").?);
     try std.testing.expectEqualStrings("https://api.minimaxi.com/v1", compatibleProviderUrl("minimax-cn").?);
     try std.testing.expectEqualStrings("https://api.minimax.io/v1", compatibleProviderUrl("minimax-intl").?);
+    // Hunyuan (Tencent Cloud) — OpenAI-compatible endpoint
+    try std.testing.expectEqualStrings("https://api.hunyuan.cloud.tencent.com/v1", compatibleProviderUrl("hunyuan").?);
+    try std.testing.expectEqualStrings("https://api.hunyuan.cloud.tencent.com/v1", compatibleProviderUrl("tencent").?);
+    // Baichuan
+    try std.testing.expectEqualStrings("https://api.baichuan-ai.com/v1", compatibleProviderUrl("baichuan").?);
 }
 
 test "nvidia resolves to correct URL" {
