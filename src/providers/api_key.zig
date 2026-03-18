@@ -335,6 +335,8 @@ fn providerEnvCandidates(name: []const u8) [3][]const u8 {
         .{ "nvidia", .{ "NVIDIA_API_KEY", "", "" } },
         .{ "nvidia-nim", .{ "NVIDIA_API_KEY", "", "" } },
         .{ "build.nvidia.com", .{ "NVIDIA_API_KEY", "", "" } },
+        .{ "novita", .{ "NOVITA_API_KEY", "", "" } },
+        .{ "novita-ai", .{ "NOVITA_API_KEY", "", "" } },
         .{ "astrai", .{ "ASTRAI_API_KEY", "", "" } },
         .{ "ollama", .{ "API_KEY", "", "" } },
         .{ "lmstudio", .{ "API_KEY", "", "" } },
