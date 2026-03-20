@@ -146,7 +146,7 @@ pub const LarkChannel = struct {
     }
 
     pub fn isUserAllowed(self: *const LarkChannel, open_id: []const u8) bool {
-        return root.isAllowedExact(self.allow_from, open_id);
+        return root.isAllowedExactScoped("lark channel", self.allow_from, open_id);
     }
 
     pub fn setBus(self: *LarkChannel, b: *bus.Bus) void {

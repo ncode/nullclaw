@@ -70,6 +70,8 @@ nullclaw gateway
 
 For long-running deployments:
 
+- Linux uses `systemd --user` when available and falls back to OpenRC on Alpine/OpenRC systems.
+
 ```bash
 nullclaw service install
 nullclaw service start

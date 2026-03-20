@@ -56,6 +56,8 @@ nullclaw gateway
 
 建议在长期运行场景使用 service 子命令：
 
+- Linux 环境会优先使用 `systemd --user`，在 Alpine / OpenRC 系统上会自动切换为 OpenRC。
+
 ```bash
 nullclaw service install
 nullclaw service start
