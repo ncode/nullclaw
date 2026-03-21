@@ -240,7 +240,10 @@ fn extractStreamUsage(json_str: []const u8) ?root.TokenUsage {
     return usage;
 }
 
-/// Extract `choices[0].delta.content` from an SSE JSON payload.
+/// Extract visible streaming text from an SSE JSON payload.
+/// Falls back to `delta.reasoning_content` when providers stream their
+/// thinking trace separately and wraps it in think tags so higher layers can
+/// suppress it from user-visible output.
 /// Returns owned slice or null if no content found.
 pub fn extractDeltaContent(allocator: std.mem.Allocator, json_str: []const u8) !?[]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch
@@ -257,11 +260,20 @@ pub fn extractDeltaContent(allocator: std.mem.Allocator, json_str: []const u8) !
     const delta = first.object.get("delta") orelse return null;
     if (delta != .object) return null;
 
-    const content = delta.object.get("content") orelse return null;
-    if (content != .string) return null;
-    if (content.string.len == 0) return null;
+    if (delta.object.get("content")) |content| {
+        if (content == .string and content.string.len > 0) {
+            return try allocator.dupe(u8, content.string);
+        }
+    }
 
-    return try allocator.dupe(u8, content.string);
+    if (delta.object.get("reasoning_content")) |reasoning_content| {
+        if (reasoning_content == .string and reasoning_content.string.len > 0) {
+            const wrapped = try std.fmt.allocPrint(allocator, "<think>{s}</think>", .{reasoning_content.string});
+            return wrapped;
+        }
+    }
+
+    return null;
 }
 
 /// Run curl in SSE streaming mode and parse output line by line.
@@ -925,6 +937,32 @@ test "extractDeltaContent without content" {
 
 test "extractDeltaContent empty content" {
     const result = try extractDeltaContent(std.testing.allocator, "{\"choices\":[{\"delta\":{\"content\":\"\"}}]}");
+    try std.testing.expect(result == null);
+}
+
+test "extractDeltaContent falls back to reasoning_content when content empty" {
+    const allocator = std.testing.allocator;
+    const result = (try extractDeltaContent(allocator, "{\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning_content\":\"step by step\"}}]}")).?;
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("<think>step by step</think>", result);
+}
+
+test "extractDeltaContent falls back to reasoning_content when content missing" {
+    const allocator = std.testing.allocator;
+    const result = (try extractDeltaContent(allocator, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"step by step\"}}]}")).?;
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("<think>step by step</think>", result);
+}
+
+test "extractDeltaContent prefers visible content over reasoning_content" {
+    const allocator = std.testing.allocator;
+    const result = (try extractDeltaContent(allocator, "{\"choices\":[{\"delta\":{\"content\":\"final answer\",\"reasoning_content\":\"private\"}}]}")).?;
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("final answer", result);
+}
+
+test "extractDeltaContent empty reasoning_content returns null" {
+    const result = try extractDeltaContent(std.testing.allocator, "{\"choices\":[{\"delta\":{\"reasoning_content\":\"\"}}]}");
     try std.testing.expect(result == null);
 }
 
