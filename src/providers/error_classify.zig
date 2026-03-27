@@ -102,9 +102,9 @@ pub fn isVisionUnsupportedText(text: []const u8) bool {
         return true;
     }
 
-    // infini-ai: "image_url' is not supported for model 'glm-5'"
-    // and similar "X is not supported" phrasing where X is image-related
-    if (containsAsciiFold(text, "image") and containsAsciiFold(text, "not supported")) {
+    // infini-ai reports unsupported vision inputs as:
+    // "message type 'image_url' is not supported for model 'glm-5'"
+    if (containsAsciiFold(text, "image_url") and containsAsciiFold(text, "not supported")) {
         return true;
     }
 
@@ -513,6 +513,18 @@ test "isVisionUnsupportedText does not false-positive on unrelated image mention
     // "image" alone without "not supported" should not trigger
     const text = "Please provide an image description";
     try std.testing.expect(!isVisionUnsupportedText(text));
+}
+
+// Regression: generic image validation failures must not disable vision support.
+test "classifyKnownApiError does not treat unsupported image format as vision unsupported" {
+    const body =
+        \\{"code":10008,"msg":"Bad Request: image format is not supported"}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+
+    const kind = classifyKnownApiError(parsed.value.object);
+    try std.testing.expectEqual(ApiErrorKind.other, kind.?);
 }
 
 test "summarizeKnownApiError captures infini-ai msg field" {
