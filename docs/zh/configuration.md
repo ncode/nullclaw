@@ -225,8 +225,8 @@ nullclaw onboard --interactive
 - 配置 LLM 提供者的全局重试和故障转移行为。
 - `provider_retries`: 重试失败的 LLM 请求的次数（默认值：2）。
 - `provider_backoff_ms`: 重试之间的初始指数退避延迟（默认值：500 毫秒）。
-- `fallback_providers`: 如果模型的主要提供方失败，尝试使用的备用提供方名称列表。
-- `model_fallbacks`: 模型到有序备用模型列表的映射。当当前模型返回错误（如 ModelUnavailable、ContextExhausted）时使用。
+- `fallback_providers`: 当未显式指定 provider 的模型需要在主要提供方之外继续尝试时，可使用的备用提供方名称列表。
+- `model_fallbacks`: 模型到有序备用模型列表的映射。每个备用项既可以是裸模型名，也可以是显式的 `provider/model` 引用。
 
 示例：
 
@@ -248,7 +248,8 @@ nullclaw onboard --interactive
 
 备注：
 
-- 故障转移顺序：对于备用链中的每个模型，NullClaw 首先尝试主要提供方，然后依次尝试每个列出的 `fallback_provider`。
+- 裸模型名的故障转移顺序：先尝试主要提供方，再依次尝试每个列出的 `fallback_provider`。
+- 像 `openai/gpt-4o` 这样的显式 `provider/model` 备用项会直接路由到对应 provider，不会再走通用 provider 扇出链路。
 - `api_keys`: (可选) 用于在速率限制 (429) 错误时轮换的额外 API 密钥列表。
 
 ### `identity`（AIEOS v1.1）

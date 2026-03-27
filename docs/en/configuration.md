@@ -284,8 +284,8 @@ Practical effect:
 - Configures global retry and failover behavior for LLM providers.
 - `provider_retries`: Number of times to retry a failed LLM request (default: 2).
 - `provider_backoff_ms`: Initial exponential backoff delay between retries (default: 500).
-- `fallback_providers`: List of provider names to try if the primary provider for a model fails.
-- `model_fallbacks`: Mapping of a model to an ordered list of fallback models. Used when the current model returns errors (e.g. ModelUnavailable, ContextExhausted).
+- `fallback_providers`: List of provider names to try if an unqualified model should fan out beyond the primary provider.
+- `model_fallbacks`: Mapping of a model to an ordered list of fallback models. Each fallback may be either another bare model name or an explicit `provider/model` ref.
 
 Example:
 
@@ -307,7 +307,8 @@ Example:
 
 Notes:
 
-- Failover order: For each model in the fallback chain, NullClaw tries the primary provider first, then each listed `fallback_provider`.
+- Failover order for bare model refs: primary provider first, then each listed `fallback_provider`.
+- Provider-qualified fallback refs such as `openai/gpt-4o` route directly to that provider and skip the generic provider fanout.
 - `api_keys`: (Optional) List of extra API keys for rotation on rate-limit (429) errors.
 
 ### `identity` (AIEOS v1.1)
