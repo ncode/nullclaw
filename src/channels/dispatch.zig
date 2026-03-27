@@ -2,9 +2,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const root = @import("root.zig");
 const bus = @import("../bus.zig");
+const channel_outbox = @import("outbox.zig");
 const outbound = @import("../outbound.zig");
 const Atomic = @import("../portable_atomic.zig").Atomic;
 const thread_stacks = @import("../thread_stacks.zig");
+const builtin = @import("builtin");
 
 /// Message dispatch — routes incoming ChannelMessages to the agent,
 /// routes agent responses back to the originating channel.
@@ -186,6 +188,16 @@ pub fn runOutboundDispatcher(
     registry: *const ChannelRegistry,
     stats: *DispatchStats,
 ) void {
+    runOutboundDispatcherWithOutbox(allocator, event_bus, registry, stats, null);
+}
+
+pub fn runOutboundDispatcherWithOutbox(
+    allocator: Allocator,
+    event_bus: *bus.Bus,
+    registry: *const ChannelRegistry,
+    stats: *DispatchStats,
+    delivery_outbox: ?*channel_outbox.DeliveryOutbox,
+) void {
     var draft_messages: DraftMessageMap = .empty;
     defer deinitDraftMessages(allocator, &draft_messages);
 
@@ -198,6 +210,16 @@ pub fn runOutboundDispatcher(
             registry.findByName(msg.channel);
 
         if (channel_opt) |channel| {
+            if (delivery_outbox) |outbox| {
+                if (shouldPersistFinalOutbound(msg)) {
+                    _ = outbox.enqueueFinal(msg) catch {
+                        _ = stats.errors.fetchAdd(1, .monotonic);
+                        continue;
+                    };
+                    _ = stats.dispatched.fetchAdd(1, .monotonic);
+                    continue;
+                }
+            }
             dispatchOutboundMessage(allocator, channel, msg, &draft_messages) catch {
                 _ = stats.errors.fetchAdd(1, .monotonic);
                 continue;
@@ -207,6 +229,46 @@ pub fn runOutboundDispatcher(
             _ = stats.channel_not_found.fetchAdd(1, .monotonic);
         }
     }
+}
+
+const OUTBOX_IDLE_POLL_MS: u64 = if (builtin.is_test) 1 else 250;
+
+pub fn runDurableOutboundWorker(
+    allocator: Allocator,
+    delivery_outbox: *channel_outbox.DeliveryOutbox,
+    registry: *const ChannelRegistry,
+) void {
+    while (!delivery_outbox.isClosed()) {
+        const processed = drainDurableOutboundOutboxOnce(allocator, delivery_outbox, registry) catch false;
+        if (!processed) std.Thread.sleep(OUTBOX_IDLE_POLL_MS * std.time.ns_per_ms);
+    }
+}
+
+pub fn drainDurableOutboundOutboxOnce(
+    allocator: Allocator,
+    delivery_outbox: *channel_outbox.DeliveryOutbox,
+    registry: *const ChannelRegistry,
+) !bool {
+    const now_ns: i64 = @intCast(std.time.nanoTimestamp());
+    var claimed = (try delivery_outbox.claimNextReady(allocator, now_ns)) orelse return false;
+    defer claimed.deinit(allocator);
+
+    const channel = if (claimed.account_id) |account_id|
+        registry.findByNameAccount(claimed.channel, account_id)
+    else
+        registry.findByName(claimed.channel);
+
+    if (channel) |resolved_channel| {
+        dispatchClaimedOutboundDirect(resolved_channel, claimed) catch |err| {
+            try delivery_outbox.recordFailure(claimed.id, @errorName(err), now_ns);
+            return true;
+        };
+        try delivery_outbox.markDelivered(claimed.id);
+        return true;
+    }
+
+    try delivery_outbox.recordFailure(claimed.id, "ChannelNotFound", now_ns);
+    return true;
 }
 
 fn deinitDraftMessages(allocator: Allocator, draft_messages: *DraftMessageMap) void {
@@ -361,6 +423,27 @@ fn dispatchOutboundDirect(channel: root.Channel, msg: bus.OutboundMessage) !void
         return;
     }
     return channel.sendEvent(msg.chat_id, msg.content, msg.media, msg.stage);
+}
+
+fn dispatchClaimedOutboundDirect(channel: root.Channel, job: channel_outbox.DeliveryOutbox.ClaimedJob) !void {
+    if (job.media.len == 0 and
+        job.choices.len > 0 and
+        !outbound.has_legacy_attachment_markers(job.content))
+    {
+        channel.sendRich(job.chat_id, .{
+            .text = job.content,
+            .choices = job.choices,
+        }) catch |err| switch (err) {
+            error.NotSupported => return channel.sendEvent(job.chat_id, job.content, &.{}, .final),
+            else => return err,
+        };
+        return;
+    }
+    return channel.sendEvent(job.chat_id, job.content, job.media, .final);
+}
+
+fn shouldPersistFinalOutbound(msg: bus.OutboundMessage) bool {
+    return msg.stage == .final and msg.draft_id == 0;
 }
 
 /// Get names of all enabled (registered) channels.
@@ -531,6 +614,8 @@ const MockChannel = struct {
     sent_count: Atomic(u64) = Atomic(u64).init(0),
     chunk_count: Atomic(u64) = Atomic(u64).init(0),
     should_fail: bool = false,
+    fail_first_final: bool = false,
+    final_attempts: Atomic(u64) = Atomic(u64).init(0),
 
     const vtable = root.Channel.VTable{
         .start = mockStart,
@@ -550,6 +635,8 @@ const MockChannel = struct {
     fn mockSend(ctx: *anyopaque, _: []const u8, _: []const u8, _: []const []const u8) anyerror!void {
         const self: *MockChannel = @ptrCast(@alignCast(ctx));
         if (self.should_fail) return error.SendFailed;
+        const attempt = self.final_attempts.fetchAdd(1, .monotonic) + 1;
+        if (self.fail_first_final and attempt == 1) return error.SendFailed;
         _ = self.sent_count.fetchAdd(1, .monotonic);
     }
     fn mockSendEvent(
@@ -563,7 +650,11 @@ const MockChannel = struct {
         if (self.should_fail) return error.SendFailed;
         switch (stage) {
             .chunk => _ = self.chunk_count.fetchAdd(1, .monotonic),
-            .final => _ = self.sent_count.fetchAdd(1, .monotonic),
+            .final => {
+                const attempt = self.final_attempts.fetchAdd(1, .monotonic) + 1;
+                if (self.fail_first_final and attempt == 1) return error.SendFailed;
+                _ = self.sent_count.fetchAdd(1, .monotonic);
+            },
         }
     }
     fn mockName(ctx: *anyopaque) []const u8 {
@@ -1196,6 +1287,73 @@ test "dispatcher increments errors on channel.send failure" {
     try std.testing.expectEqual(@as(u64, 0), stats.getDispatched());
     try std.testing.expectEqual(@as(u64, 1), stats.getErrors());
     try std.testing.expectEqual(@as(u64, 0), stats.getChannelNotFound());
+}
+
+test "dispatcher can enqueue final outbound into durable outbox" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root);
+    const outbox_path = try std.fs.path.join(allocator, &.{ tmp_root, "delivery.json" });
+    defer allocator.free(outbox_path);
+
+    var outbox = try channel_outbox.DeliveryOutbox.init(allocator, outbox_path);
+    defer outbox.deinit();
+
+    var mock_tg = MockChannel{ .name_str = "telegram" };
+    var reg = ChannelRegistry.init(allocator);
+    defer reg.deinit();
+    try reg.register(mock_tg.channel());
+
+    var event_bus = bus.Bus.init();
+    var stats = DispatchStats{};
+
+    const msg = try bus.makeOutbound(allocator, "telegram", "chat1", "hello");
+    try event_bus.publishOutbound(msg);
+    event_bus.close();
+
+    runOutboundDispatcherWithOutbox(allocator, &event_bus, &reg, &stats, &outbox);
+
+    try std.testing.expectEqual(@as(u64, 1), stats.getDispatched());
+    try std.testing.expectEqual(@as(usize, 1), outbox.pendingCount());
+    try std.testing.expectEqual(@as(u64, 0), mock_tg.sent_count.load(.monotonic));
+}
+
+test "durable outbound worker retries persisted final delivery" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root);
+    const outbox_path = try std.fs.path.join(allocator, &.{ tmp_root, "delivery.json" });
+    defer allocator.free(outbox_path);
+
+    var outbox = try channel_outbox.DeliveryOutbox.init(allocator, outbox_path);
+    defer outbox.deinit();
+
+    var mock_tg = MockChannel{
+        .name_str = "telegram",
+        .fail_first_final = true,
+    };
+    var reg = ChannelRegistry.init(allocator);
+    defer reg.deinit();
+    try reg.register(mock_tg.channel());
+
+    var msg = try bus.makeOutbound(allocator, "telegram", "chat1", "hello");
+    defer msg.deinit(allocator);
+    _ = try outbox.enqueueFinal(msg);
+
+    try std.testing.expect(try drainDurableOutboundOutboxOnce(allocator, &outbox, &reg));
+    try std.testing.expectEqual(@as(usize, 1), outbox.pendingCount());
+    try std.testing.expectEqual(@as(u64, 1), mock_tg.final_attempts.load(.monotonic));
+
+    try std.testing.expect(try drainDurableOutboundOutboxOnce(allocator, &outbox, &reg));
+    try std.testing.expectEqual(@as(usize, 0), outbox.pendingCount());
+    try std.testing.expectEqual(@as(u64, 2), mock_tg.final_attempts.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), mock_tg.sent_count.load(.monotonic));
 }
 
 test "dispatcher handles multiple messages" {
