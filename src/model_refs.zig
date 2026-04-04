@@ -50,6 +50,8 @@ const known_url_model_provider_namespaces = std.StaticStringMap(void).initCompti
     .{ "moonshot", {} },
     .{ "kimi", {} },
     .{ "minimax", {} },
+    .{ "minimaxai", {} },
+    .{ "minimaxi", {} },
     .{ "glm", {} },
     .{ "zhipu", {} },
     .{ "hunyuan", {} },
@@ -202,6 +204,13 @@ test "splitProviderModel keeps namespaced models after versionless base path" {
     const split = splitProviderModel("custom:https://gateway.example.com/api/qianfan/custom-model") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("custom:https://gateway.example.com/api", split.provider.?);
     try std.testing.expectEqualStrings("qianfan/custom-model", split.model);
+}
+
+test "splitProviderModel keeps minimaxai namespace on versionless custom urls" {
+    // Regression: versionless custom providers must preserve provider-like model namespaces.
+    const split = splitProviderModel("custom:https://gateway.example.com/minimaxai/minimax-m2.1") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("custom:https://gateway.example.com", split.provider.?);
+    try std.testing.expectEqualStrings("minimaxai/minimax-m2.1", split.model);
 }
 
 test "splitProviderModel preserves explicit responses endpoint suffix" {

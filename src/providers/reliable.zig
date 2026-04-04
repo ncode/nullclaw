@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("root.zig");
+const model_refs = @import("../model_refs.zig");
 
 const Provider = root.Provider;
 const ChatRequest = root.ChatRequest;
@@ -265,26 +266,6 @@ pub const ReliableProvider = struct {
         return chain;
     }
 
-    fn splitProviderModel(model_ref: []const u8) struct { provider: ?[]const u8, model: []const u8 } {
-        const slash = std.mem.indexOfScalar(u8, model_ref, '/') orelse {
-            return .{ .provider = null, .model = model_ref };
-        };
-        if (slash == 0 or slash + 1 >= model_ref.len) {
-            return .{ .provider = null, .model = model_ref };
-        }
-        return .{
-            .provider = model_ref[0..slash],
-            .model = model_ref[slash + 1 ..],
-        };
-    }
-
-    fn matchProviderPrefix(model_ref: []const u8, provider_name: []const u8) ?[]const u8 {
-        if (!std.mem.startsWith(u8, model_ref, provider_name)) return null;
-        if (model_ref.len <= provider_name.len + 1) return null;
-        if (model_ref[provider_name.len] != '/') return null;
-        return model_ref[provider_name.len + 1 ..];
-    }
-
     fn matchesProvider(provider_name: []const u8, requested: []const u8) bool {
         return std.ascii.eqlIgnoreCase(provider_name, requested);
     }
@@ -293,32 +274,32 @@ pub const ReliableProvider = struct {
         var best_target: ?ResolvedProviderTarget = null;
         var best_prefix_len: usize = 0;
 
-        if (matchProviderPrefix(model_ref, self.inner.getName())) |resolved_model| {
+        if (model_refs.matchExplicitProviderPrefix(model_ref, self.inner.getName())) |split| {
             best_target = .{
                 .provider = self.inner,
-                .model = resolved_model,
+                .model = split.model,
                 .explicit = true,
             };
             best_prefix_len = self.inner.getName().len;
         }
 
         for (self.extras) |entry| {
-            if (matchProviderPrefix(model_ref, entry.name)) |resolved_model| {
+            if (model_refs.matchExplicitProviderPrefix(model_ref, entry.name)) |split| {
                 if (entry.name.len > best_prefix_len) {
                     best_target = .{
                         .provider = entry.provider,
-                        .model = resolved_model,
+                        .model = split.model,
                         .explicit = true,
                     };
                     best_prefix_len = entry.name.len;
                 }
             }
             const provider_runtime_name = entry.provider.getName();
-            if (matchProviderPrefix(model_ref, provider_runtime_name)) |resolved_model| {
+            if (model_refs.matchExplicitProviderPrefix(model_ref, provider_runtime_name)) |split| {
                 if (provider_runtime_name.len > best_prefix_len) {
                     best_target = .{
                         .provider = entry.provider,
-                        .model = resolved_model,
+                        .model = split.model,
                         .explicit = true,
                     };
                     best_prefix_len = provider_runtime_name.len;
@@ -326,7 +307,10 @@ pub const ReliableProvider = struct {
             }
         }
 
-        const split = splitProviderModel(model_ref);
+        const split = model_refs.splitProviderModel(model_ref) orelse model_refs.ProviderModelRef{
+            .provider = null,
+            .model = model_ref,
+        };
         if (best_target) |target| return target;
         if (std.mem.eql(u8, self.inner.getName(), "router")) {
             return .{

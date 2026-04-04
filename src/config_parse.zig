@@ -2515,6 +2515,35 @@ test "parseJson keeps configured versionless custom url namespaces in defaults" 
     try std.testing.expectEqualStrings("qianfan/custom-model", cfg.default_model.?);
 }
 
+test "parseJson keeps minimaxai namespace in versionless custom url defaults" {
+    // Regression: restart parsing must preserve versionless custom refs with provider-like model namespaces.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = allocator,
+    };
+
+    const json =
+        \\{
+        \\  "agents": {
+        \\    "defaults": {
+        \\      "model": {
+        \\        "primary": "custom:https://gateway.example.com/minimaxai/minimax-m2.1"
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("custom:https://gateway.example.com", cfg.default_provider);
+    try std.testing.expect(cfg.default_model != null);
+    try std.testing.expectEqualStrings("minimaxai/minimax-m2.1", cfg.default_model.?);
+}
+
 test "parseJson keeps route-only custom url provider refs in defaults" {
     // Regression: explicit providers defined only in model_routes must survive restart parsing.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

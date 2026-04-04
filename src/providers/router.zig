@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("root.zig");
+const model_refs = @import("../model_refs.zig");
 
 const Provider = root.Provider;
 const ChatRequest = root.ChatRequest;
@@ -110,14 +111,13 @@ pub const RouterProvider = struct {
         var best_prefix_len: usize = 0;
 
         for (self.provider_names, 0..) |provider_name, provider_idx| {
-            if (!std.mem.startsWith(u8, model_ref, provider_name)) continue;
-            if (model_ref.len <= provider_name.len + 1) continue;
-            if (model_ref[provider_name.len] != '/') continue;
-            if (provider_name.len <= best_prefix_len) continue;
+            const split = model_refs.matchExplicitProviderPrefix(model_ref, provider_name) orelse continue;
+            const provider_len = split.provider.?.len;
+            if (provider_len <= best_prefix_len) continue;
 
-            best_prefix_len = provider_name.len;
+            best_prefix_len = provider_len;
             best_index = provider_idx;
-            best_model = model_ref[provider_name.len + 1 ..];
+            best_model = split.model;
         }
 
         if (best_index) |provider_idx| {
