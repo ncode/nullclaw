@@ -31,6 +31,7 @@ const tencent_crypto = @import("security/tencent_crypto.zig");
 const root_mod = @import("root.zig");
 const PairingGuard = @import("security/pairing.zig").PairingGuard;
 const constantTimeEq = @import("security/pairing.zig").constantTimeEq;
+const isPublicBindHost = @import("security/pairing.zig").isPublicBind;
 const channels = @import("channels/root.zig");
 const bus_mod = @import("bus.zig");
 const a2a = @import("a2a.zig");
@@ -294,7 +295,7 @@ const GatewayThreadObserver = struct {
 pub const SlidingWindowRateLimiter = struct {
     limit_per_window: u32,
     window_ns: i128,
-    /// Map of key -> list of request timestamps (as nanoTimestamp values).
+    /// Map of owned key bytes -> list of request timestamps (as nanoTimestamp values).
     entries: std.StringHashMapUnmanaged(std.ArrayList(i128)),
     last_sweep: i128,
 
@@ -310,6 +311,7 @@ pub const SlidingWindowRateLimiter = struct {
     pub fn deinit(self: *SlidingWindowRateLimiter, allocator: std.mem.Allocator) void {
         var iter = self.entries.iterator();
         while (iter.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit(allocator);
         }
         self.entries.deinit(allocator);
@@ -328,13 +330,18 @@ pub const SlidingWindowRateLimiter = struct {
             self.last_sweep = now;
         }
 
-        const gop = self.entries.getOrPut(allocator, key) catch return true;
-        if (!gop.found_existing) {
-            gop.value_ptr.* = .empty;
-        }
+        const timestamps = blk: {
+            if (self.entries.getPtr(key)) |existing| break :blk existing;
+
+            const owned_key = allocator.dupe(u8, key) catch return true;
+            self.entries.put(allocator, owned_key, .empty) catch {
+                allocator.free(owned_key);
+                return true;
+            };
+            break :blk self.entries.getPtr(key) orelse return true;
+        };
 
         // Remove expired entries
-        var timestamps = gop.value_ptr;
         var i: usize = 0;
         while (i < timestamps.items.len) {
             if (timestamps.items[i] <= cutoff) {
@@ -372,6 +379,7 @@ pub const SlidingWindowRateLimiter = struct {
 
         for (to_remove.items) |key| {
             if (self.entries.fetchRemove(key)) |kv| {
+                allocator.free(kv.key);
                 var list = kv.value;
                 list.deinit(allocator);
             }
@@ -2154,6 +2162,52 @@ fn effectiveRequestReadTimeoutSecs(config_opt: ?*const Config) u64 {
     return REQUEST_TIMEOUT_SECS;
 }
 
+fn ensureSafeGatewayBind(host: []const u8, config_opt: ?*const Config, tunnel_url_opt: ?[]const u8) !void {
+    if (!isPublicBindHost(host)) return;
+    if (config_opt) |cfg| {
+        if (cfg.gateway.allow_public_bind) return;
+    }
+    if (tunnel_url_opt) |url| {
+        if (url.len > 0) return;
+    }
+    return error.PublicBindRequiresTunnel;
+}
+
+fn clientIdentifierFromAddress(address: std.net.Address, buf: *[64]u8) []const u8 {
+    return switch (address.any.family) {
+        std.posix.AF.INET => blk: {
+            const octets: *const [4]u8 = @ptrCast(&address.in.sa.addr);
+            break :blk std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ octets[0], octets[1], octets[2], octets[3] }) catch "ipv4";
+        },
+        std.posix.AF.INET6 => blk: {
+            const bytes = address.in6.sa.addr;
+            break :blk std.fmt.bufPrint(
+                buf,
+                "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}",
+                .{
+                    bytes[0],  bytes[1],  bytes[2],  bytes[3],
+                    bytes[4],  bytes[5],  bytes[6],  bytes[7],
+                    bytes[8],  bytes[9],  bytes[10], bytes[11],
+                    bytes[12], bytes[13], bytes[14], bytes[15],
+                },
+            ) catch "ipv6";
+        },
+        else => "unknown",
+    };
+}
+
+fn allowScopedWebhook(state: *GatewayState, scope: []const u8, client_identifier: []const u8) bool {
+    var key_buf: [96]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "{s}:{s}", .{ scope, client_identifier }) catch return true;
+    return state.rate_limiter.allowWebhook(state.allocator, key);
+}
+
+fn allowScopedPair(state: *GatewayState, scope: []const u8, client_identifier: []const u8) bool {
+    var key_buf: [96]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "{s}:{s}", .{ scope, client_identifier }) catch return true;
+    return state.rate_limiter.allowPair(state.allocator, key);
+}
+
 fn expectedHttpRequestSize(raw: []const u8, max_body: usize) !?usize {
     const header_end = headerEndOffset(raw) orelse {
         if (raw.len > MAX_HEADER_SIZE) return error.RequestTooLarge;
@@ -2374,6 +2428,7 @@ const WebhookHandlerContext = struct {
     raw_request: []const u8,
     method: []const u8,
     target: []const u8,
+    client_identifier: []const u8 = "test-client",
     config_opt: ?*const Config,
     state: *GatewayState,
     session_mgr_opt: ?*session_mod.SessionManager,
@@ -2982,7 +3037,7 @@ fn handleTelegramWebhookRoute(ctx: *WebhookHandlerContext) void {
         return;
     }
 
-    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "telegram")) {
+    if (!allowScopedWebhook(ctx.state, "telegram", ctx.client_identifier)) {
         ctx.response_status = "429 Too Many Requests";
         ctx.response_body = "{\"error\":\"rate limited\"}";
         return;
@@ -3118,7 +3173,7 @@ fn handleWhatsAppWebhookRoute(ctx: *WebhookHandlerContext) void {
         return;
     }
 
-    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "whatsapp")) {
+    if (!allowScopedWebhook(ctx.state, "whatsapp", ctx.client_identifier)) {
         ctx.response_status = "429 Too Many Requests";
         ctx.response_body = "{\"error\":\"rate limited\"}";
         return;
@@ -3299,7 +3354,7 @@ fn handleSlackWebhookRoute(ctx: *WebhookHandlerContext) void {
         ctx.response_body = "{\"error\":\"method not allowed\"}";
         return;
     }
-    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "slack")) {
+    if (!allowScopedWebhook(ctx.state, "slack", ctx.client_identifier)) {
         ctx.response_status = "429 Too Many Requests";
         ctx.response_body = "{\"error\":\"rate limited\"}";
         return;
@@ -3670,7 +3725,7 @@ fn handleLineWebhookRoute(ctx: *WebhookHandlerContext) void {
         ctx.response_body = "{\"error\":\"method not allowed\"}";
         return;
     }
-    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "line")) {
+    if (!allowScopedWebhook(ctx.state, "line", ctx.client_identifier)) {
         ctx.response_status = "429 Too Many Requests";
         ctx.response_body = "{\"error\":\"rate limited\"}";
         return;
@@ -3798,7 +3853,7 @@ fn handleLarkWebhookRoute(ctx: *WebhookHandlerContext) void {
         ctx.response_body = "{\"error\":\"method not allowed\"}";
         return;
     }
-    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "lark")) {
+    if (!allowScopedWebhook(ctx.state, "lark", ctx.client_identifier)) {
         ctx.response_status = "429 Too Many Requests";
         ctx.response_body = "{\"error\":\"rate limited\"}";
         return;
@@ -3992,7 +4047,7 @@ fn handleWeChatWebhookRoute(ctx: *WebhookHandlerContext) void {
         return;
     }
 
-    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "wechat")) {
+    if (!allowScopedWebhook(ctx.state, "wechat", ctx.client_identifier)) {
         ctx.response_status = "429 Too Many Requests";
         ctx.response_body = "{\"error\":\"rate limited\"}";
         return;
@@ -4214,7 +4269,7 @@ fn handleWeComWebhookRoute(ctx: *WebhookHandlerContext) void {
         ctx.response_body = "{\"error\":\"method not allowed\"}";
         return;
     }
-    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "wecom")) {
+    if (!allowScopedWebhook(ctx.state, "wecom", ctx.client_identifier)) {
         ctx.response_status = "429 Too Many Requests";
         ctx.response_body = "{\"error\":\"rate limited\"}";
         return;
@@ -4333,7 +4388,7 @@ fn handleQqWebhookRoute(ctx: *WebhookHandlerContext) void {
         ctx.response_body = "{\"error\":\"method not allowed\"}";
         return;
     }
-    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "qq")) {
+    if (!allowScopedWebhook(ctx.state, "qq", ctx.client_identifier)) {
         ctx.response_status = "429 Too Many Requests";
         ctx.response_body = "{\"error\":\"rate limited\"}";
         return;
@@ -4451,7 +4506,7 @@ fn handleMaxWebhookRoute(ctx: *WebhookHandlerContext) void {
         ctx.response_body = "{\"error\":\"method not allowed\"}";
         return;
     }
-    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "max")) {
+    if (!allowScopedWebhook(ctx.state, "max", ctx.client_identifier)) {
         ctx.response_status = "429 Too Many Requests";
         ctx.response_body = "{\"error\":\"rate limited\"}";
         return;
@@ -4570,7 +4625,7 @@ fn handleTeamsWebhookRoute(ctx: *WebhookHandlerContext) void {
         return;
     }
 
-    if (!ctx.state.rate_limiter.allowWebhook(ctx.state.allocator, "teams")) {
+    if (!allowScopedWebhook(ctx.state, "teams", ctx.client_identifier)) {
         ctx.response_status = "429 Too Many Requests";
         ctx.response_body = "{\"error\":\"rate limited\"}";
         return;
@@ -4930,7 +4985,14 @@ pub fn clearSharedScheduler() void {
 /// Run the HTTP gateway. Binds to host:port and serves HTTP requests.
 /// Endpoints: GET /health, GET /ready, POST /pair, POST /webhook, GET|POST /whatsapp, POST /telegram, POST /slack/events, POST /line, POST /lark, GET|POST /wechat, GET|POST /wecom, POST /qq, POST /max
 /// If config_ptr is null, loads config internally (for backward compatibility).
-pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr: ?*const Config, event_bus: ?*bus_mod.Bus) !void {
+pub fn run(
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+    config_ptr: ?*const Config,
+    event_bus: ?*bus_mod.Bus,
+    tunnel_url_opt: ?[]const u8,
+) !void {
     health.markComponentOk("gateway");
 
     var state = GatewayState.init(allocator);
@@ -4950,6 +5012,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     defer if (owned_config) |*c| c.deinit();
     const max_body = if (config_opt) |cfg| cfg.gateway.max_body_size_bytes else MAX_BODY_SIZE;
     const request_timeout_secs = effectiveRequestReadTimeoutSecs(config_opt);
+    try ensureSafeGatewayBind(host, config_opt, tunnel_url_opt);
 
     // Provider runtime bundle (primary + reliability wrapper) must outlive the accept loop.
     var provider_bundle_opt: ?providers.runtime_bundle.RuntimeProviderBundle = null;
@@ -5195,6 +5258,8 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
         var close_conn = true;
         defer if (close_conn) conn.stream.close();
         configureRequestReadTimeout(&conn.stream, request_timeout_secs);
+        var client_identifier_buf: [64]u8 = undefined;
+        const client_identifier = clientIdentifierFromAddress(conn.address, &client_identifier_buf);
 
         // Per-request arena — all request-scoped allocations freed in one shot
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -5263,6 +5328,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                     .raw_request = raw,
                     .method = method_str,
                     .target = target,
+                    .client_identifier = client_identifier,
                     .config_opt = config_opt,
                     .state = &state,
                     .session_mgr_opt = if (session_mgr_opt) |*sm| sm else null,
@@ -5273,30 +5339,32 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                 response_body = cron_ctx.response_body;
             }
         } else if (findWebhookRouteDescriptor(base_path)) |desc| {
-            var webhook_ctx = WebhookHandlerContext{
-                .root_allocator = allocator,
-                .req_allocator = req_allocator,
-                .raw_request = raw,
-                .method = method_str,
-                .target = target,
-                .config_opt = config_opt,
-                .state = &state,
-                .session_mgr_opt = if (session_mgr_opt) |*sm| sm else null,
+                var webhook_ctx = WebhookHandlerContext{
+                    .root_allocator = allocator,
+                    .req_allocator = req_allocator,
+                    .raw_request = raw,
+                    .method = method_str,
+                    .target = target,
+                    .client_identifier = client_identifier,
+                    .config_opt = config_opt,
+                    .state = &state,
+                    .session_mgr_opt = if (session_mgr_opt) |*sm| sm else null,
             };
             desc.handler(&webhook_ctx);
             response_status = webhook_ctx.response_status;
             response_content_type = webhook_ctx.response_content_type;
             response_body = webhook_ctx.response_body;
         } else if (hasSlackHttpEndpoint(config_opt, base_path)) {
-            var webhook_ctx = WebhookHandlerContext{
-                .root_allocator = allocator,
-                .req_allocator = req_allocator,
-                .raw_request = raw,
-                .method = method_str,
-                .target = target,
-                .config_opt = config_opt,
-                .state = &state,
-                .session_mgr_opt = if (session_mgr_opt) |*sm| sm else null,
+                var webhook_ctx = WebhookHandlerContext{
+                    .root_allocator = allocator,
+                    .req_allocator = req_allocator,
+                    .raw_request = raw,
+                    .method = method_str,
+                    .target = target,
+                    .client_identifier = client_identifier,
+                    .config_opt = config_opt,
+                    .state = &state,
+                    .session_mgr_opt = if (session_mgr_opt) |*sm| sm else null,
             };
             handleSlackWebhookRoute(&webhook_ctx);
             response_status = webhook_ctx.response_status;
@@ -5335,7 +5403,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                 if (!isWebhookAuthorized(pairing_guard, bearer)) {
                     response_status = "401 Unauthorized";
                     response_body = "{\"error\":\"unauthorized\"}";
-                } else if (!state.rate_limiter.allowWebhook(state.allocator, "a2a")) {
+                } else if (!allowScopedWebhook(&state, "a2a", client_identifier)) {
                     response_status = "429 Too Many Requests";
                     response_body = "{\"error\":\"rate limited\"}";
                 } else {
@@ -5399,7 +5467,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                     if (!isWebhookAuthorized(pairing_guard, bearer)) {
                         response_status = "401 Unauthorized";
                         response_body = "{\"error\":\"unauthorized\"}";
-                    } else if (!state.rate_limiter.allowWebhook(state.allocator, "webhook")) {
+                    } else if (!allowScopedWebhook(&state, "webhook", client_identifier)) {
                         response_status = "429 Too Many Requests";
                         response_body = "{\"error\":\"rate limited\"}";
                     } else {
@@ -5449,7 +5517,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                 if (!is_post) {
                     response_status = "405 Method Not Allowed";
                     response_body = "{\"error\":\"method not allowed\"}";
-                } else if (!state.rate_limiter.allowPair(state.allocator, "pair")) {
+                } else if (!allowScopedPair(&state, "pair", client_identifier)) {
                     response_status = "429 Too Many Requests";
                     response_body = "{\"error\":\"rate limited\"}";
                 } else {
@@ -5919,6 +5987,45 @@ test "gateway rate limiter blocks after limit" {
     try std.testing.expect(limiter.allowPair(std.testing.allocator, "127.0.0.1"));
     try std.testing.expect(limiter.allowPair(std.testing.allocator, "127.0.0.1"));
     try std.testing.expect(!limiter.allowPair(std.testing.allocator, "127.0.0.1"));
+}
+
+test "scoped webhook rate limits stay independent per route and client" {
+    var state = GatewayState.init(std.testing.allocator);
+    defer state.deinit();
+    state.rate_limiter = GatewayRateLimiter.init(1, 1);
+
+    try std.testing.expect(allowScopedWebhook(&state, "telegram", "203.0.113.10"));
+    try std.testing.expect(!allowScopedWebhook(&state, "telegram", "203.0.113.10"));
+    try std.testing.expect(allowScopedWebhook(&state, "slack", "203.0.113.10"));
+    try std.testing.expect(allowScopedWebhook(&state, "telegram", "203.0.113.11"));
+}
+
+test "ensureSafeGatewayBind rejects public host without tunnel or override" {
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expectError(error.PublicBindRequiresTunnel, ensureSafeGatewayBind("0.0.0.0", &cfg, null));
+}
+
+test "ensureSafeGatewayBind allows public host when explicitly enabled" {
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = std.testing.allocator,
+    };
+    cfg.gateway.allow_public_bind = true;
+    try ensureSafeGatewayBind("0.0.0.0", &cfg, null);
+}
+
+test "ensureSafeGatewayBind allows public host when tunnel is active" {
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = std.testing.allocator,
+    };
+    try ensureSafeGatewayBind("0.0.0.0", &cfg, "https://public.example");
 }
 
 test "idempotency store rejects duplicate key" {
@@ -8764,6 +8871,6 @@ test "run returns AddressInUse when port is already bound" {
     const bound_port = listener.listen_address.in.getPort();
 
     // Try to start gateway on the same port - should fail with AddressInUse
-    const result = run(std.testing.allocator, "127.0.0.1", bound_port, null, null);
+    const result = run(std.testing.allocator, "127.0.0.1", bound_port, null, null, null);
     try std.testing.expectError(error.AddressInUse, result);
 }

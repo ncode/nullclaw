@@ -727,7 +727,7 @@ pub const Config = struct {
         try w.print("[", .{});
         for (values, 0..) |value, i| {
             if (i > 0) try w.print(", ", .{});
-            try w.print("\"{s}\"", .{value});
+            try writeJsonStr(w, value);
         }
         try w.print("]", .{});
     }
@@ -2585,6 +2585,55 @@ test "save escapes mcp_servers strings safely" {
     try std.testing.expectEqual(@as(usize, 1), loaded.mcp_servers[0].env.len);
     try std.testing.expectEqualStrings("OPEN\"KEY", loaded.mcp_servers[0].env[0].key);
     try std.testing.expectEqualStrings("ab\\cd\"ef\nz", loaded.mcp_servers[0].env[0].value);
+}
+
+test "save escapes string arrays safely" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{base});
+    defer allocator.free(config_path);
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.default_model = "gpt-5";
+    cfg.reliability.fallback_providers = &.{
+        "provider\"one",
+        "path\\two",
+    };
+    cfg.gateway.paired_tokens = &.{
+        "tok\"one",
+        "tok\\two",
+    };
+
+    try cfg.save();
+
+    const file = try std.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 128 * 1024);
+    defer allocator.free(content);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var loaded = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = arena.allocator(),
+    };
+    try loaded.parseJson(content);
+
+    try std.testing.expectEqual(@as(usize, 2), loaded.reliability.fallback_providers.len);
+    try std.testing.expectEqualStrings("provider\"one", loaded.reliability.fallback_providers[0]);
+    try std.testing.expectEqualStrings("path\\two", loaded.reliability.fallback_providers[1]);
+    try std.testing.expectEqual(@as(u32, 2), loaded.gateway.paired_tokens.len);
+    try std.testing.expectEqualStrings("tok\"one", loaded.gateway.paired_tokens[0]);
+    try std.testing.expectEqualStrings("tok\\two", loaded.gateway.paired_tokens[1]);
 }
 
 test "syncFlatFields propagates nested values" {

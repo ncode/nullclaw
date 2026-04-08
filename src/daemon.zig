@@ -177,6 +177,9 @@ fn logGatewayFailure(err: anyerror, port: u16) void {
         error.AddressInUse => {
             log.err("Gateway failed to start: port {d} is already in use. Is another nullclaw instance running?", .{port});
         },
+        error.PublicBindRequiresTunnel => {
+            log.err("Gateway failed to start: public bind requires an active tunnel or gateway.allow_public_bind=true.", .{});
+        },
         else => {
             log.err("Gateway failed to start: {}", .{err});
         },
@@ -187,7 +190,7 @@ fn logGatewayFailure(err: anyerror, port: u16) void {
 /// Gateway thread entry point.
 fn gatewayThread(allocator: std.mem.Allocator, config: *const Config, host: []const u8, port: u16, state: *DaemonState, event_bus: *bus_mod.Bus) void {
     const gateway = @import("gateway.zig");
-    gateway.run(allocator, host, port, config, event_bus) catch |err| {
+    gateway.run(allocator, host, port, config, event_bus, state.tunnel_url) catch |err| {
         logGatewayFailure(err, port);
         recordGatewayFailure(err, state);
         return;
