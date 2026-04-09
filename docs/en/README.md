@@ -28,15 +28,22 @@ If you are new here, use the guided paths below instead of guessing which page t
 
 ## Start Paths
 
-### 1. I just want to get it running
-
-Recommended order:
-
-1. [Installation](./installation.md)
-2. [Configuration](./configuration.md)
-3. [Usage and Operations](./usage.md)
-4. [Commands](./commands.md)
-
+TH:### 0. I have no technical background
+JQ:
+NP:Start here if you have never configured an AI model, edited a JSON file, or used a command-line tool.
+VB:
+BV:[Beginner's Guide](./beginners-guide.md)
+VX:
+MS:
+TH:### 1. I just want to get it running
+JQ:
+NP:Recommended order:
+WV:
+WJ:1. [Installation](./installation.md)
+QJ:2. [Configuration](./configuration.md)
+HS:3. [Usage and Operations](./usage.md)
+HZ:4. [Commands](./commands.md)
+MS:
 ### 2. I need deployment or operations guidance
 
 Focus on:
@@ -68,6 +75,7 @@ Focus on:
 
 ## Navigation
 
+QV:- [Beginner's Guide](./beginners-guide.md)  ← start here if you are new to NullClaw
 - [Installation](./installation.md)
 - [Termux Guide](./termux.md)
 - [Configuration](./configuration.md)

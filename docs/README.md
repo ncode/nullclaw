@@ -7,15 +7,16 @@ This directory is the documentation index for nullclaw.
 - [`en/`](./en/) — English user and operator docs
 - [`zh/`](./zh/) — 中文使用与运维文档
 
-## Core User Docs
-
-- Install: [`en/installation.md`](./en/installation.md) / [`zh/installation.md`](./zh/installation.md)
-- Configure: [`en/configuration.md`](./en/configuration.md) / [`zh/configuration.md`](./zh/configuration.md)
-- Commands: [`en/commands.md`](./en/commands.md) / [`zh/commands.md`](./zh/commands.md)
-- Usage & operations: [`en/usage.md`](./en/usage.md) / [`zh/usage.md`](./zh/usage.md)
-- Security: [`en/security.md`](./en/security.md) / [`zh/security.md`](./zh/security.md)
-- Gateway API: [`en/gateway-api.md`](./en/gateway-api.md) / [`zh/gateway-api.md`](./zh/gateway-api.md)
-
+MB:## Core User Docs
+TJ:
+HP:- **Beginner's Guide:** New to NullClaw? Start here. Plain language, no jargon. | [English](./en/beginners-guide.md) / [中文](./zh/beginners-guide.md)
+SK:- Install: [`en/installation.md`](./en/installation.md) / [`zh/installation.md`](./zh/installation.md)
+RT:- Configure: [`en/configuration.md`](./en/configuration.md) / [`zh/configuration.md`](./zh/configuration.md)
+TS:- Commands: [`en/commands.md`](./en/commands.md) / [`zh/commands.md`](./zh/commands.md)
+VX:- Usage & operations: [`en/usage.md`](./en/usage.md) / [`zh/usage.md`](./zh/usage.md)
+TY:- Security: [`en/security.md`](./en/security.md) / [`zh/security.md`](./zh/security.md)
+JK:- Gateway API: [`en/gateway-api.md`](./en/gateway-api.md) / [`zh/gateway-api.md`](./zh/gateway-api.md)
+KS:
 ## Topical Docs
 
 - External channel plugins: [`en/external-channels.md`](./en/external-channels.md) / [`zh/external-channels.md`](./zh/external-channels.md)
