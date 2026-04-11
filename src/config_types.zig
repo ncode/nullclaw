@@ -147,11 +147,55 @@ pub const DiagnosticsConfig = struct {
             trimmed = trimmed[0 .. trimmed.len - 1];
         }
         if (trimmed.len == 0) return false;
-        if (!McpServerConfig.isValidHttpUrl(trimmed)) return false;
 
         const uri = std.Uri.parse(trimmed) catch return false;
+        const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+        const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
+        if (!is_https and !is_http) return false;
+
+        const host_comp = uri.host orelse return false;
+        const host = switch (host_comp) {
+            .raw => |h| h,
+            .percent_encoded => |h| blk: {
+                if (std.mem.indexOfScalar(u8, h, '%') != null) return false;
+                break :blk h;
+            },
+        };
+        if (host.len == 0) return false;
+        if (std.mem.indexOfAny(u8, host, " \t\r\n") != null) return false;
+        if (host[0] == ':') return false;
+
+        if (is_http and !isPrivateOtelCollectorHost(host)) return false;
+
+        if (host[0] == '[') {
+            const close = std.mem.indexOfScalar(u8, host, ']') orelse return false;
+            if (close != host.len - 1) return false;
+        }
+
         if (uri.query != null or uri.fragment != null) return false;
+        if (uri.port) |port| if (port == 0) return false;
         return true;
+    }
+
+    fn isPrivateOtelCollectorHost(host: []const u8) bool {
+        if (net_security.isLocalHost(host)) return true;
+
+        const bare = if (std.mem.startsWith(u8, host, "[") and std.mem.endsWith(u8, host, "]"))
+            host[1 .. host.len - 1]
+        else
+            host;
+        if (bare.len == 0) return false;
+
+        // Container networks commonly expose services by a single-label DNS
+        // name such as `otel`, and container runtimes expose host bridges with
+        // names like `host.containers.internal`. Allow plaintext OTEL only for
+        // these local runtime naming conventions.
+        if (std.mem.indexOfScalar(u8, bare, '.') == null and std.mem.indexOfScalar(u8, bare, ':') == null) {
+            return true;
+        }
+        if (std.mem.endsWith(u8, bare, ".internal")) return true;
+
+        return false;
     }
 };
 
@@ -1824,6 +1868,8 @@ test "DiagnosticsConfig otel endpoint validation" {
     try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://localhost:4318"));
     try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://127.0.0.1:4318"));
     try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://10.0.0.5:4318"));
+    try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://otel:4318"));
+    try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://host.containers.internal:4318"));
     try std.testing.expect(!DiagnosticsConfig.isValidOtelEndpoint("http://otel.example.com:4318"));
     try std.testing.expect(!DiagnosticsConfig.isValidOtelEndpoint("https://otel.example.com?x=1"));
     try std.testing.expect(!DiagnosticsConfig.isValidOtelEndpoint("https://otel.example.com#frag"));

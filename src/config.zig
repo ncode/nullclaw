@@ -2929,6 +2929,20 @@ test "validation accepts local diagnostics otel endpoint over plain http" {
     try cfg.validate();
 }
 
+test "validation accepts container-local diagnostics otel endpoint over plain http" {
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .default_model = "x",
+        .allocator = std.testing.allocator,
+    };
+    cfg.diagnostics.otel_endpoint = "http://otel:4318";
+    try cfg.validate();
+
+    cfg.diagnostics.otel_endpoint = "http://host.containers.internal:4318";
+    try cfg.validate();
+}
+
 test "validation rejects remote diagnostics otel endpoint over plain http" {
     var cfg = Config{
         .workspace_dir = "/tmp/yc",
