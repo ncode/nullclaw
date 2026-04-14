@@ -594,6 +594,17 @@ pub const WeComConfig = struct {
     allow_from: []const []const u8 = &.{},
 };
 
+pub const WeixinConfig = struct {
+    account_id: []const u8 = "default",
+    /// Bot token obtained from iLink QR code login flow.
+    token: []const u8 = "",
+    /// iLink API base URL (may be region-specific after login redirect).
+    base_url: []const u8 = "https://ilinkai.weixin.qq.com/",
+    /// Optional HTTP proxy URL for API requests.
+    proxy: ?[]const u8 = null,
+    allow_from: []const []const u8 = &.{},
+};
+
 pub const SignalConfig = struct {
     account_id: []const u8 = "default",
     http_url: []const u8,
@@ -933,6 +944,7 @@ pub const ChannelsConfig = struct {
     dingtalk: []const DingTalkConfig = &.{},
     wechat: []const WeChatConfig = &.{},
     wecom: []const WeComConfig = &.{},
+    weixin: []const WeixinConfig = &.{},
     signal: []const SignalConfig = &.{},
     email: []const EmailConfig = &.{},
     line: []const LineConfig = &.{},
@@ -1000,6 +1012,9 @@ pub const ChannelsConfig = struct {
     }
     pub fn wecomPrimary(self: *const ChannelsConfig) ?WeComConfig {
         return primaryAccount(WeComConfig, self.wecom);
+    }
+    pub fn weixinPrimary(self: *const ChannelsConfig) ?WeixinConfig {
+        return primaryAccount(WeixinConfig, self.weixin);
     }
     pub fn emailPrimary(self: *const ChannelsConfig) ?EmailConfig {
         return primaryAccount(EmailConfig, self.email);

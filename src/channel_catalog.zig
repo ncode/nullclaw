@@ -18,6 +18,7 @@ pub const ChannelId = enum {
     dingtalk,
     wechat,
     wecom,
+    weixin,
     signal,
     email,
     line,
@@ -62,6 +63,7 @@ pub const known_channels = [_]ChannelMeta{
     .{ .id = .dingtalk, .key = "dingtalk", .label = "DingTalk", .configured_message = "DingTalk configured", .listener_mode = .gateway_loop },
     .{ .id = .wechat, .key = "wechat", .label = "WeChat", .configured_message = "WeChat configured", .listener_mode = .webhook_only },
     .{ .id = .wecom, .key = "wecom", .label = "WeCom", .configured_message = "WeCom configured", .listener_mode = .webhook_only },
+    .{ .id = .weixin, .key = "weixin", .label = "Weixin", .configured_message = "Weixin (iLink) configured", .listener_mode = .polling },
     .{ .id = .signal, .key = "signal", .label = "Signal", .configured_message = "Signal configured", .listener_mode = .polling },
     .{ .id = .email, .key = "email", .label = "Email", .configured_message = "Email configured", .listener_mode = .send_only },
     .{ .id = .line, .key = "line", .label = "Line", .configured_message = "Line configured", .listener_mode = .webhook_only },
@@ -91,6 +93,7 @@ pub fn isBuildEnabled(channel_id: ChannelId) bool {
         .dingtalk => build_options.enable_channel_dingtalk,
         .wechat => build_options.enable_channel_wechat,
         .wecom => build_options.enable_channel_wecom,
+        .weixin => build_options.enable_channel_wechat,
         .signal => build_options.enable_channel_signal,
         .email => build_options.enable_channel_email,
         .line => build_options.enable_channel_line,
@@ -120,6 +123,7 @@ pub fn isBuildEnabledByKey(comptime key: []const u8) bool {
     if (comptime std.mem.eql(u8, key, "dingtalk")) return build_options.enable_channel_dingtalk;
     if (comptime std.mem.eql(u8, key, "wechat")) return build_options.enable_channel_wechat;
     if (comptime std.mem.eql(u8, key, "wecom")) return build_options.enable_channel_wecom;
+    if (comptime std.mem.eql(u8, key, "weixin")) return build_options.enable_channel_wechat;
     if (comptime std.mem.eql(u8, key, "signal")) return build_options.enable_channel_signal;
     if (comptime std.mem.eql(u8, key, "email")) return build_options.enable_channel_email;
     if (comptime std.mem.eql(u8, key, "line")) return build_options.enable_channel_line;
@@ -150,6 +154,7 @@ pub fn configuredCount(cfg: *const Config, channel_id: ChannelId) usize {
         .dingtalk => cfg.channels.dingtalk.len,
         .wechat => cfg.channels.wechat.len,
         .wecom => cfg.channels.wecom.len,
+        .weixin => cfg.channels.weixin.len,
         .signal => cfg.channels.signal.len,
         .email => cfg.channels.email.len,
         .line => cfg.channels.line.len,

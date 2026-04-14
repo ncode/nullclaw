@@ -2940,10 +2940,16 @@ fn runAuth(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
     const codex = yc.providers.openai_codex;
     const auth_mod = yc.auth;
 
+    if (std.mem.eql(u8, provider_name, "weixin")) {
+        runAuthWeixin(allocator, subcmd, rest);
+        return;
+    }
+
     if (!std.mem.eql(u8, provider_name, "openai-codex")) {
         std.debug.print("Unknown auth provider: {s}\n\n", .{provider_name});
         std.debug.print("Available providers:\n", .{});
         std.debug.print("  openai-codex    ChatGPT Plus/Pro subscription (OAuth)\n", .{});
+        std.debug.print("  weixin          WeChat personal account (QR code scan)\n", .{});
         std.process.exit(1);
     }
 
@@ -3031,21 +3037,165 @@ fn printAuthUsage() void {
         \\Usage: nullclaw auth <{s}> <provider> [options]
         \\
         \\Commands:
-        \\  login <provider>                    Authenticate via device code flow
+        \\  login <provider>                    Authenticate with provider
         \\  login <provider> --import-codex     Import from Codex CLI (~/.codex/auth.json)
         \\  status <provider>                   Show authentication status
         \\  logout <provider>                   Remove stored credentials
         \\
         \\Providers:
         \\  openai-codex    ChatGPT Plus/Pro subscription (OAuth)
+        \\  weixin          WeChat personal account (QR code scan)
+        \\
+        \\Weixin options:
+        \\  --base-url <url>    iLink API base URL (default: https://ilinkai.weixin.qq.com/)
+        \\  --proxy <url>       HTTP proxy URL (e.g. http://localhost:7890)
+        \\  --timeout <secs>    Login timeout in seconds (default: 300)
         \\
         \\Examples:
         \\  nullclaw auth login openai-codex
         \\  nullclaw auth login openai-codex --import-codex
+        \\  nullclaw auth login weixin
+        \\  nullclaw auth login weixin --proxy http://localhost:7890
         \\  nullclaw auth status openai-codex
+        \\  nullclaw auth status weixin
         \\  nullclaw auth logout openai-codex
         \\
     , .{AUTH_SUBCOMMANDS}), .{});
+}
+
+fn runAuthWeixin(allocator: std.mem.Allocator, subcmd: []const u8, args: []const []const u8) void {
+    const weixin_mod = yc.channels.weixin;
+    const config_mutator = yc.config_mutator;
+
+    if (std.mem.eql(u8, subcmd, "login")) {
+        var opts = weixin_mod.LoginOptions{};
+
+        var i: usize = 0;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--base-url") and i + 1 < args.len) {
+                i += 1;
+                opts.base_url = args[i];
+            } else if (std.mem.eql(u8, args[i], "--proxy") and i + 1 < args.len) {
+                i += 1;
+                opts.proxy = args[i];
+            } else if (std.mem.eql(u8, args[i], "--timeout") and i + 1 < args.len) {
+                i += 1;
+                const secs = std.fmt.parseInt(u64, args[i], 10) catch {
+                    std.debug.print("Invalid timeout value: {s}\n", .{args[i]});
+                    std.process.exit(1);
+                };
+                opts.timeout_ns = secs * std.time.ns_per_s;
+            } else {
+                std.debug.print("Unknown option: {s}\n", .{args[i]});
+                printAuthUsage();
+                std.process.exit(1);
+            }
+        }
+
+        std.debug.print("Starting Weixin (WeChat personal) login...\n\n", .{});
+
+        var result = weixin_mod.performLogin(allocator, opts) catch |err| {
+            std.debug.print("Weixin login failed: {s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer result.deinit(allocator);
+
+        std.debug.print("\nLogin successful!\n", .{});
+        std.debug.print("  Account ID: {s}\n", .{result.account_id});
+        if (result.user_id.len > 0) {
+            std.debug.print("  User ID: {s}\n", .{result.user_id});
+        }
+
+        // Persist token to config
+        const token_json = std.fmt.allocPrint(allocator, "\"{s}\"", .{result.bot_token}) catch {
+            std.debug.print("\nCould not format token for config. Add manually:\n", .{});
+            printManualWeixinConfig(result.bot_token, result.base_url);
+            return;
+        };
+        defer allocator.free(token_json);
+
+        _ = config_mutator.mutateDefaultConfig(
+            allocator,
+            .set,
+            "channels.weixin.token",
+            token_json,
+            .{ .apply = true },
+        ) catch {
+            std.debug.print("\nCould not auto-save config. Add manually:\n", .{});
+            printManualWeixinConfig(result.bot_token, result.base_url);
+            return;
+        };
+
+        // Save base_url if it differs from default
+        if (!std.mem.eql(u8, result.base_url, "https://ilinkai.weixin.qq.com/")) {
+            const base_url_json = std.fmt.allocPrint(allocator, "\"{s}\"", .{result.base_url}) catch return;
+            defer allocator.free(base_url_json);
+            _ = config_mutator.mutateDefaultConfig(
+                allocator,
+                .set,
+                "channels.weixin.base_url",
+                base_url_json,
+                .{ .apply = true },
+            ) catch {};
+        }
+
+        std.debug.print("\nConfig updated. Start the gateway with:\n", .{});
+        std.debug.print("  nullclaw gateway\n\n", .{});
+        std.debug.print("To restrict which WeChat users can send messages, add their user IDs\n", .{});
+        std.debug.print("to channels.weixin.allow_from in your config.\n", .{});
+    } else if (std.mem.eql(u8, subcmd, "status")) {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        var cfg = yc.config.Config.load(arena.allocator()) catch {
+            std.debug.print("weixin: could not load config\n", .{});
+            return;
+        };
+        defer cfg.deinit();
+
+        if (cfg.channels.weixinPrimary()) |weixin_cfg| {
+            if (weixin_cfg.token.len > 0) {
+                std.debug.print("weixin: authenticated\n", .{});
+                std.debug.print("  Token: {s}...{s}\n", .{
+                    weixin_cfg.token[0..@min(8, weixin_cfg.token.len)],
+                    if (weixin_cfg.token.len > 8) weixin_cfg.token[weixin_cfg.token.len - 4 ..] else "",
+                });
+                std.debug.print("  Base URL: {s}\n", .{weixin_cfg.base_url});
+            } else {
+                std.debug.print("weixin: not authenticated (token empty)\n", .{});
+                std.debug.print("  Run `nullclaw auth login weixin` to authenticate.\n", .{});
+            }
+        } else {
+            std.debug.print("weixin: not configured\n", .{});
+            std.debug.print("  Run `nullclaw auth login weixin` to authenticate.\n", .{});
+        }
+    } else if (std.mem.eql(u8, subcmd, "logout")) {
+        _ = config_mutator.mutateDefaultConfig(
+            allocator,
+            .unset,
+            "channels.weixin.token",
+            null,
+            .{ .apply = true },
+        ) catch |err| {
+            std.debug.print("Failed to remove weixin credentials: {s}\n", .{@errorName(err)});
+            return;
+        };
+        std.debug.print("weixin: credentials removed.\n", .{});
+    } else {
+        std.debug.print("Unknown auth command: {s}\n\n", .{subcmd});
+        printAuthUsage();
+        std.process.exit(1);
+    }
+}
+
+fn printManualWeixinConfig(token: []const u8, base_url: []const u8) void {
+    std.debug.print("\nAdd the following to the channels section of your nullclaw config:\n\n", .{});
+    std.debug.print("  \"weixin\": [{{\n", .{});
+    std.debug.print("    \"token\": \"{s}\",\n", .{token});
+    if (!std.mem.eql(u8, base_url, "https://ilinkai.weixin.qq.com/")) {
+        std.debug.print("    \"base_url\": \"{s}\",\n", .{base_url});
+    }
+    std.debug.print("    \"allow_from\": []\n", .{});
+    std.debug.print("  }}]\n", .{});
 }
 
 fn runAuthDeviceCodeLogin(

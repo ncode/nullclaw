@@ -290,6 +290,7 @@ pub const lark = @import("lark.zig");
 pub const dingtalk = @import("dingtalk.zig");
 pub const wechat = @import("wechat.zig");
 pub const wecom = @import("wecom.zig");
+pub const weixin = @import("weixin.zig");
 pub const nostr = @import("nostr.zig");
 pub const line = @import("line.zig");
 pub const onebot = @import("onebot.zig");
