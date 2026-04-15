@@ -2444,7 +2444,7 @@ fn resolveRunnableCwd(cwd_opt: ?[]const u8) ?[]const u8 {
     if (std_compat.fs.path.isAbsolute(cwd)) {
         std_compat.fs.accessAbsolute(cwd, .{}) catch return null;
     } else {
-        std_compat.fs.cwd().access(cwd, .{}) catch return null;
+        fs_compat.accessPath(cwd, .{}) catch return null;
     }
     return cwd;
 }

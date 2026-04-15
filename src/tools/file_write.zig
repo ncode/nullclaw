@@ -59,7 +59,7 @@ pub const FileWriteTool = struct {
 
         // Resolve and validate before any filesystem writes so symlink targets
         // and disallowed absolute destinations are rejected without side effects.
-        const resolved_target: ?[]const u8 = std_compat.fs.cwd().realpathAlloc(allocator, full_path) catch |err| switch (err) {
+        const resolved_target: ?[]const u8 = fs_compat.realpathAllocPath(allocator, full_path) catch |err| switch (err) {
             error.FileNotFound => null,
             else => {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to resolve path: {}", .{err});
@@ -125,7 +125,7 @@ pub const FileWriteTool = struct {
         defer allocator.free(write_path);
 
         const existing_mode: ?std_compat.fs.File.Mode = blk: {
-            const st = std_compat.fs.cwd().statFile(write_path) catch |err| switch (err) {
+            const st = fs_compat.statPath(write_path) catch |err| switch (err) {
                 error.FileNotFound => break :blk null,
                 else => {
                     const msg = try std.fmt.allocPrint(allocator, "Failed to stat file: {}", .{err});
@@ -157,7 +157,7 @@ pub const FileWriteTool = struct {
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             }
         else
-            std_compat.fs.cwd().openDir(parent, .{}) catch |err| {
+            fs_compat.openDirPath(parent, .{}) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to open directory: {}", .{err});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             };
@@ -217,7 +217,7 @@ pub const FileWriteTool = struct {
         };
         committed = true;
 
-        const final_resolved = std_compat.fs.cwd().realpathAlloc(allocator, full_path) catch |err| {
+        const final_resolved = fs_compat.realpathAllocPath(allocator, full_path) catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "Failed to resolve path: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };
@@ -227,7 +227,7 @@ pub const FileWriteTool = struct {
             if (std_compat.fs.path.isAbsolute(write_path)) {
                 std_compat.fs.deleteFileAbsolute(write_path) catch {};
             } else {
-                std_compat.fs.cwd().deleteFile(write_path) catch {};
+                fs_compat.deletePath(write_path) catch {};
             }
             return ToolResult.fail("Path is outside allowed areas");
         }

@@ -148,7 +148,7 @@ pub const SecretStore = struct {
             const archived_path = self.archivedPrevKeyPath(&archived_buf, stamp_ns, suffix) catch {
                 return error.KeyRotateFailed;
             };
-            std_compat.fs.cwd().rename(prev_path, archived_path) catch |err| switch (err) {
+            fs_compat.renamePath(prev_path, archived_path) catch |err| switch (err) {
                 error.FileNotFound => return,
                 else => return error.KeyRotateFailed,
             };
@@ -164,7 +164,7 @@ pub const SecretStore = struct {
         try self.archivePreviousKey();
         var prev_buf: [std_compat.fs.max_path_bytes]u8 = undefined;
         const prev_path = self.prevKeyPath(&prev_buf) catch return error.KeyRotateFailed;
-        std_compat.fs.cwd().rename(path, prev_path) catch return error.KeyRotateFailed;
+        fs_compat.renamePath(path, prev_path) catch return error.KeyRotateFailed;
 
         var new_key: [KEY_LEN]u8 = undefined;
         std_compat.crypto.random.bytes(&new_key);
@@ -272,7 +272,7 @@ pub const SecretStore = struct {
         var prefix_buf: [std_compat.fs.max_path_bytes]u8 = undefined;
         const prefix = std.fmt.bufPrint(&prefix_buf, "{s}.prev.", .{key_name}) catch return error.KeyReadFailed;
 
-        var dir = std_compat.fs.cwd().openDir(key_dir, .{ .iterate = true }) catch return error.KeyReadFailed;
+        var dir = fs_compat.openDirPath(key_dir, .{ .iterate = true }) catch return error.KeyReadFailed;
         defer dir.close();
 
         var iter = dir.iterate();
@@ -310,7 +310,7 @@ pub const SecretStore = struct {
         const path = self.keyPath();
 
         // Try to read existing key
-        if (std_compat.fs.cwd().openFile(path, .{})) |file| {
+        if (fs_compat.openPath(path, .{})) |file| {
             defer file.close();
             var key = try self.readKeyFromFile(file);
 
@@ -352,7 +352,7 @@ pub const SecretStore = struct {
 
     fn loadKeyFromPath(self: *const SecretStore, path: []const u8) ![KEY_LEN]u8 {
         _ = self;
-        const file = std_compat.fs.cwd().openFile(path, .{}) catch return error.KeyReadFailed;
+        const file = fs_compat.openPath(path, .{}) catch return error.KeyReadFailed;
         defer file.close();
         var hex_buf: [KEY_LEN * 2 + 16]u8 = undefined;
         const bytes_read = file.readAll(&hex_buf) catch return error.KeyReadFailed;
@@ -373,7 +373,7 @@ pub const SecretStore = struct {
             };
         }
 
-        const file = std_compat.fs.cwd().createFile(path, .{}) catch return error.KeyWriteFailed;
+        const file = fs_compat.createPath(path, .{}) catch return error.KeyWriteFailed;
         defer file.close();
         file.writeAll(&hex_buf) catch return error.KeyWriteFailed;
 
@@ -642,7 +642,7 @@ test "secret store key file created on first encrypt" {
 
     // Key file should exist now
     const key_path = store.keyPath();
-    const file = try std_compat.fs.cwd().openFile(key_path, .{});
+    const file = try fs_compat.openPath(key_path, .{});
     defer file.close();
     var buf: [128]u8 = undefined;
     const bytes_read = try file.readAll(&buf);

@@ -130,7 +130,7 @@ fn archiveOldFiles(allocator: std.mem.Allocator, config: HygieneConfig) !u64 {
     const memory_dir_path = try std_compat.fs.path.join(allocator, &.{ config.workspace_dir, "memory" });
     defer allocator.free(memory_dir_path);
 
-    var memory_dir = std_compat.fs.cwd().openDir(memory_dir_path, .{ .iterate = true }) catch return 0;
+    var memory_dir = fs_compat.openDirPath(memory_dir_path, .{ .iterate = true }) catch return 0;
     defer memory_dir.close();
 
     const archive_path = try std_compat.fs.path.join(allocator, &.{ config.workspace_dir, "memory", "archive" });
@@ -160,9 +160,9 @@ fn archiveOldFiles(allocator: std.mem.Allocator, config: HygieneConfig) !u64 {
         const dst_path = std_compat.fs.path.join(allocator, &.{ archive_path, name }) catch continue;
         defer allocator.free(dst_path);
 
-        std_compat.fs.cwd().rename(src_path, dst_path) catch {
+        fs_compat.renamePath(src_path, dst_path) catch {
             // Fallback: try copy + delete
-            var dest_dir = std_compat.fs.cwd().openDir(archive_path, .{}) catch continue;
+            var dest_dir = fs_compat.openDirPath(archive_path, .{}) catch continue;
             defer dest_dir.close();
             memory_dir.copyFile(name, dest_dir, name, .{}) catch continue;
             memory_dir.deleteFile(name) catch {};
@@ -183,7 +183,7 @@ fn purgeOldArchives(
     const archive_path = try std_compat.fs.path.join(allocator, &.{ config.workspace_dir, "memory", "archive" });
     defer allocator.free(archive_path);
 
-    var archive_dir = std_compat.fs.cwd().openDir(archive_path, .{ .iterate = true }) catch return 0;
+    var archive_dir = fs_compat.openDirPath(archive_path, .{ .iterate = true }) catch return 0;
     defer archive_dir.close();
 
     const cutoff_secs = std_compat.time.timestamp() - @as(i64, @intCast(config.purge_after_days)) * 24 * 60 * 60;
@@ -491,7 +491,7 @@ test "runIfDue preserves archived markdown chunks before purge" {
     defer std.testing.allocator.free(archive_path);
     try fs_compat.makePath(archive_path);
 
-    var archive_dir = try std_compat.fs.cwd().openDir(archive_path, .{});
+    var archive_dir = try fs_compat.openDirPath(archive_path, .{});
     defer archive_dir.close();
 
     var file = try archive_dir.createFile("old-memory.md", .{});
@@ -539,7 +539,7 @@ test "runIfDue deletes old archives when memory is unavailable" {
     defer std.testing.allocator.free(archive_path);
     try fs_compat.makePath(archive_path);
 
-    var archive_dir = try std_compat.fs.cwd().openDir(archive_path, .{});
+    var archive_dir = try fs_compat.openDirPath(archive_path, .{});
     defer archive_dir.close();
 
     var file = try archive_dir.createFile("old-memory.md", .{});

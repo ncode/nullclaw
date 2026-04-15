@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const std_compat = @import("compat");
+const fs_compat = @import("../fs_compat.zig");
 const path_prefix = @import("../path_prefix.zig");
 
 /// System-critical prefixes (Unix) — always blocked even if they match allowed_paths.
@@ -68,7 +69,7 @@ pub fn isResolvedPathAllowed(
         const ap = std.mem.trim(u8, raw_allowed_path, " \t\r\n");
         if (ap.len == 0) continue;
         if (std.mem.eql(u8, ap, "*")) return true;
-        const ap_resolved = std_compat.fs.cwd().realpathAlloc(allocator, ap) catch continue;
+        const ap_resolved = fs_compat.realpathAllocPath(allocator, ap) catch continue;
         defer allocator.free(ap_resolved);
         if (pathStartsWith(resolved, ap_resolved)) return true;
     }

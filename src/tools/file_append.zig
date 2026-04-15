@@ -64,7 +64,7 @@ pub const FileAppendTool = struct {
 
         const full_path = path_info.full_path;
         const ws_str = path_info.workspacePath();
-        const resolved_target: ?[]const u8 = std_compat.fs.cwd().realpathAlloc(allocator, full_path) catch |err| switch (err) {
+        const resolved_target: ?[]const u8 = fs_compat.realpathAllocPath(allocator, full_path) catch |err| switch (err) {
             error.FileNotFound => null,
             else => {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to resolve file path: {} ({s})", .{ err, path });
@@ -140,10 +140,7 @@ pub const FileAppendTool = struct {
         const existing = blk: {
             if (resolved_target == null) break :blk @as(?[]const u8, null);
             const read_path = if (existing_is_symlink) resolved_target.? else full_path;
-            const file = (if (std_compat.fs.path.isAbsolute(read_path))
-                std_compat.fs.openFileAbsolute(read_path, .{})
-            else
-                std_compat.fs.cwd().openFile(read_path, .{})) catch |err| {
+            const file = fs_compat.openPath(read_path, .{}) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to open file: {}", .{err});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             };
@@ -170,7 +167,7 @@ pub const FileAppendTool = struct {
         defer allocator.free(write_path);
 
         const existing_mode: ?std_compat.fs.File.Mode = blk: {
-            const st = std_compat.fs.cwd().statFile(write_path) catch |err| switch (err) {
+            const st = fs_compat.statPath(write_path) catch |err| switch (err) {
                 error.FileNotFound => break :blk null,
                 else => {
                     const msg = try std.fmt.allocPrint(allocator, "Failed to stat file: {}", .{err});
@@ -201,7 +198,7 @@ pub const FileAppendTool = struct {
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             }
         else
-            std_compat.fs.cwd().openDir(parent, .{}) catch |err| {
+            fs_compat.openDirPath(parent, .{}) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to open directory: {}", .{err});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             };
@@ -261,11 +258,11 @@ pub const FileAppendTool = struct {
         };
         committed = true;
 
-        const final_resolved = std_compat.fs.cwd().realpathAlloc(allocator, write_path) catch {
+        const final_resolved = fs_compat.realpathAllocPath(allocator, write_path) catch {
             if (std_compat.fs.path.isAbsolute(write_path)) {
                 std_compat.fs.deleteFileAbsolute(write_path) catch {};
             } else {
-                std_compat.fs.cwd().deleteFile(write_path) catch {};
+                fs_compat.deletePath(write_path) catch {};
             }
             return ToolResult.fail("Failed to verify created file location");
         };
@@ -275,7 +272,7 @@ pub const FileAppendTool = struct {
             if (std_compat.fs.path.isAbsolute(write_path)) {
                 std_compat.fs.deleteFileAbsolute(write_path) catch {};
             } else {
-                std_compat.fs.cwd().deleteFile(write_path) catch {};
+                fs_compat.deletePath(write_path) catch {};
             }
             return ToolResult.fail("Path is outside allowed areas");
         }

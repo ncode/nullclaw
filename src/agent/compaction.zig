@@ -6,6 +6,7 @@
 const std = @import("std");
 const std_compat = @import("compat");
 const builtin = @import("builtin");
+const fs_compat = @import("../fs_compat.zig");
 const log = std.log.scoped(.agent);
 const providers = @import("../providers/root.zig");
 const config_types = @import("../config_types.zig");
@@ -464,13 +465,13 @@ fn openWorkspaceAgentsFileGuarded(
     allocator: std.mem.Allocator,
     workspace_dir: []const u8,
 ) ?std_compat.fs.File {
-    const workspace_root = std_compat.fs.cwd().realpathAlloc(allocator, workspace_dir) catch return null;
+    const workspace_root = fs_compat.realpathAllocPath(allocator, workspace_dir) catch return null;
     defer allocator.free(workspace_root);
 
     const agents_candidate = std_compat.fs.path.join(allocator, &.{ workspace_root, "AGENTS.md" }) catch return null;
     defer allocator.free(agents_candidate);
 
-    const agents_canonical = std_compat.fs.cwd().realpathAlloc(allocator, agents_candidate) catch |err| switch (err) {
+    const agents_canonical = fs_compat.realpathAllocPath(allocator, agents_candidate) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return null,
     };

@@ -10,6 +10,12 @@ fn capped_read_limit(max_bytes: u64) usize {
 /// Compatibility wrapper for `Dir.readFileAlloc` that avoids Zig 0.15.2's
 /// `File.stat()` path on Linux kernels where `statx` is unavailable.
 pub fn readFileAlloc(dir: anytype, allocator: std.mem.Allocator, sub_path: []const u8, max_bytes: u64) ![]u8 {
+    if (std.fs.path.isAbsolute(sub_path)) {
+        const file = try openPath(sub_path, .{});
+        defer file.close();
+        return try file.readToEndAlloc(allocator, capped_read_limit(max_bytes));
+    }
+
     const compat_dir = if (@TypeOf(dir) == std_compat.fs.Dir) dir else std_compat.fs.Dir.wrap(dir);
     const file = try compat_dir.openFile(sub_path, .{});
     defer file.close();
@@ -73,10 +79,24 @@ pub fn createPath(path: []const u8, options: std_compat.fs.Dir.CreateFileOptions
     return try std_compat.fs.cwd().createFile(path, options);
 }
 
+pub fn openDirPath(path: []const u8, options: std_compat.fs.Dir.OpenDirOptions) !std_compat.fs.Dir {
+    if (std.fs.path.isAbsolute(path)) {
+        return try std_compat.fs.openDirAbsolute(path, options);
+    }
+    return try std_compat.fs.cwd().openDir(path, options);
+}
+
 pub fn statPath(path: []const u8) !std_compat.fs.File.Stat {
     const file = try openPath(path, .{});
     defer file.close();
     return try stat(file);
+}
+
+pub fn accessPath(path: []const u8, options: std_compat.fs.Dir.AccessOptions) !void {
+    if (std.fs.path.isAbsolute(path)) {
+        return try std_compat.fs.accessAbsolute(path, options);
+    }
+    return try std_compat.fs.cwd().access(path, options);
 }
 
 pub fn renamePath(old_path: []const u8, new_path: []const u8) !void {
@@ -84,6 +104,20 @@ pub fn renamePath(old_path: []const u8, new_path: []const u8) !void {
         return try std_compat.fs.renameAbsolute(old_path, new_path);
     }
     return try std_compat.fs.cwd().rename(old_path, new_path);
+}
+
+pub fn deletePath(path: []const u8) !void {
+    if (std.fs.path.isAbsolute(path)) {
+        return try std_compat.fs.deleteFileAbsolute(path);
+    }
+    return try std_compat.fs.cwd().deleteFile(path);
+}
+
+pub fn realpathAllocPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) {
+        return try std_compat.fs.realpathAlloc(allocator, path);
+    }
+    return try std_compat.fs.cwd().realpathAlloc(allocator, path);
 }
 
 pub fn openPathForAppend(path: []const u8) !std_compat.fs.File {
@@ -280,4 +314,58 @@ test "renamePath supports absolute paths" {
     defer std.testing.allocator.free(content);
 
     try std.testing.expectEqualStrings("moved", content);
+}
+
+test "readFileAlloc reads absolute path contents" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const abs = try @import("compat").fs.Dir.wrap(tmp_dir.dir).realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs);
+
+    const target = try std.fs.path.join(std.testing.allocator, &.{ abs, "absolute.txt" });
+    defer std.testing.allocator.free(target);
+
+    const file = try createPath(target, .{});
+    defer file.close();
+    try file.writeAll("absolute");
+
+    const content = try readFileAlloc(std_compat.fs.cwd(), std.testing.allocator, target, 64);
+    defer std.testing.allocator.free(content);
+
+    try std.testing.expectEqualStrings("absolute", content);
+}
+
+test "openDirPath and accessPath support absolute paths" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const abs = try @import("compat").fs.Dir.wrap(tmp_dir.dir).realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs);
+
+    try accessPath(abs, .{});
+
+    var dir = try openDirPath(abs, .{ .iterate = true });
+    defer dir.close();
+
+    const nested = try std.fs.path.join(std.testing.allocator, &.{ abs, "nested.txt" });
+    defer std.testing.allocator.free(nested);
+    const nested_file = try createPath(nested, .{});
+    defer nested_file.close();
+    try nested_file.writeAll("nested");
+
+    try accessPath(nested, .{});
+}
+
+test "realpathAllocPath resolves absolute paths" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const abs = try @import("compat").fs.Dir.wrap(tmp_dir.dir).realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs);
+
+    const resolved = try realpathAllocPath(std.testing.allocator, abs);
+    defer std.testing.allocator.free(resolved);
+
+    try std.testing.expectEqualStrings(abs, resolved);
 }

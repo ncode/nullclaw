@@ -66,13 +66,13 @@ fn openWorkspaceFileWithGuards(
 ) ?GuardedWorkspaceFileOpen {
     if (!isWorkspaceBootstrapFilenameSafe(filename)) return null;
 
-    const workspace_root = std_compat.fs.cwd().realpathAlloc(allocator, workspace_dir) catch return null;
+    const workspace_root = fs_compat.realpathAllocPath(allocator, workspace_dir) catch return null;
     defer allocator.free(workspace_root);
 
     const candidate = std_compat.fs.path.join(allocator, &.{ workspace_dir, filename }) catch return null;
     defer allocator.free(candidate);
 
-    const canonical_path = std_compat.fs.cwd().realpathAlloc(allocator, candidate) catch |err| switch (err) {
+    const canonical_path = fs_compat.realpathAllocPath(allocator, candidate) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return null,
     };

@@ -1,5 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
+const fs_compat = @import("../fs_compat.zig");
 const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
@@ -46,7 +47,7 @@ pub const FileDeleteTool = struct {
         const full_path = try std_compat.fs.path.join(allocator, &.{ self.workspace_dir, path });
         defer allocator.free(full_path);
 
-        const ws_resolved: ?[]const u8 = std_compat.fs.cwd().realpathAlloc(allocator, self.workspace_dir) catch null;
+        const ws_resolved: ?[]const u8 = fs_compat.realpathAllocPath(allocator, self.workspace_dir) catch null;
         defer if (ws_resolved) |wr| allocator.free(wr);
         const ws_path = ws_resolved orelse "";
 

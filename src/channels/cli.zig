@@ -1,5 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
+const fs_compat = @import("../fs_compat.zig");
 const platform = @import("../platform.zig");
 const root = @import("root.zig");
 
@@ -101,7 +102,7 @@ const MAX_HISTORY_LINES: usize = 500;
 /// If the file does not exist, returns an empty slice.
 /// Caller owns the returned slice and all strings within it.
 pub fn loadHistory(allocator: std.mem.Allocator, path: []const u8) ![][]const u8 {
-    const file = std_compat.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+    const file = fs_compat.openPath(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return try allocator.alloc([]const u8, 0),
         else => return err,
     };
@@ -176,7 +177,7 @@ pub fn freeHistory(allocator: std.mem.Allocator, history: [][]const u8) void {
 /// Save command history to a file (one command per line).
 /// Writes at most MAX_HISTORY_LINES entries.
 pub fn saveHistory(history: []const []const u8, path: []const u8) !void {
-    const file = try std_compat.fs.cwd().createFile(path, .{ .truncate = true });
+    const file = try fs_compat.createPath(path, .{ .truncate = true });
     defer file.close();
 
     const start = if (history.len > MAX_HISTORY_LINES) history.len - MAX_HISTORY_LINES else 0;
@@ -223,7 +224,7 @@ test "loadHistory reads file lines" {
 
     // Write a temporary history file
     {
-        const f = try std_compat.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+        const f = try fs_compat.createPath(tmp_path, .{ .truncate = true });
         defer f.close();
         try f.writeAll("hello world\nhow are you\ngoodbye\n");
     }
@@ -313,7 +314,7 @@ test "loadHistory trims whitespace from entries" {
     defer allocator.free(tmp_path);
 
     {
-        const f = try std_compat.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+        const f = try fs_compat.createPath(tmp_path, .{ .truncate = true });
         defer f.close();
         try f.writeAll("  hello  \n\t world \t\nfoo\r\n");
     }
@@ -339,7 +340,7 @@ test "loadHistory skips blank lines" {
     defer allocator.free(tmp_path);
 
     {
-        const f = try std_compat.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+        const f = try fs_compat.createPath(tmp_path, .{ .truncate = true });
         defer f.close();
         try f.writeAll("first\n\n   \n\nsecond\n  \nthird\n");
     }
@@ -365,7 +366,7 @@ test "loadHistory enforces max entries limit" {
     defer allocator.free(tmp_path);
 
     {
-        const f = try std_compat.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+        const f = try fs_compat.createPath(tmp_path, .{ .truncate = true });
         defer f.close();
         // Write more than MAX_HISTORY_LINES (500) entries
         for (0..600) |i| {

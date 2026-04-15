@@ -3109,7 +3109,7 @@ fn runAuthImportCodex(
     };
     defer allocator.free(path);
 
-    const file = std_compat.fs.cwd().openFile(path, .{}) catch {
+    const file = std_compat.fs.openFileAbsolute(path, .{}) catch {
         std.debug.print("Could not open {s}\n", .{path});
         std.debug.print("Install and authenticate with Codex CLI first.\n", .{});
         std_compat.process.exit(1);

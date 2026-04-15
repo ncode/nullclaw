@@ -138,7 +138,7 @@ pub const MarkdownMemory = struct {
         // Open (or create) without truncation and seek to end to append.
         // This avoids the read-concat-rewrite pattern which loses data if
         // the process crashes between truncation and write completion.
-        const file = try std_compat.fs.cwd().createFile(path, .{ .truncate = false, .read = true });
+        const file = try fs_compat.createPath(path, .{ .truncate = false, .read = true });
         defer file.close();
 
         const stat = try fs_compat.stat(file);
@@ -249,7 +249,7 @@ pub const MarkdownMemory = struct {
             defer allocator.free(root_path);
 
             // Open file, get its stat, then read content in one go.
-            const file = std_compat.fs.cwd().openFile(root_path, .{}) catch continue;
+            const file = fs_compat.openPath(root_path, .{}) catch continue;
             defer file.close();
             const stat = fs_compat.stat(file) catch continue;
             const content = file.readToEndAlloc(allocator, 1024 * 1024) catch continue;
@@ -281,7 +281,7 @@ pub const MarkdownMemory = struct {
 
         const md = try self.memoryDir(allocator);
         defer allocator.free(md);
-        if (std_compat.fs.cwd().openDir(md, .{ .iterate = true })) |*dir_handle| {
+        if (fs_compat.openDirPath(md, .{ .iterate = true })) |*dir_handle| {
             var dir = dir_handle.*;
             defer dir.close();
             var it = dir.iterate();
@@ -290,7 +290,7 @@ pub const MarkdownMemory = struct {
                 const fpath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ md, entry.name });
                 defer allocator.free(fpath);
 
-                const file = std_compat.fs.cwd().openFile(fpath, .{}) catch continue;
+                const file = fs_compat.openPath(fpath, .{}) catch continue;
                 defer file.close();
                 const stat = fs_compat.stat(file) catch continue;
                 const content = file.readToEndAlloc(allocator, 1024 * 1024) catch continue;

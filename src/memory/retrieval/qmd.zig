@@ -289,7 +289,7 @@ pub const QmdAdapter = struct {
             if (skip) continue;
 
             // Write file
-            const file = std_compat.fs.cwd().createFile(file_path, .{}) catch |err| {
+            const file = fs_compat.createPath(file_path, .{}) catch |err| {
                 log.warn("failed to write session export '{s}': {}", .{ file_path, err });
                 continue;
             };
@@ -317,7 +317,7 @@ pub const QmdAdapter = struct {
         const retention_ns: i128 = @as(i128, self.config.sessions.retention_days) * 24 * 3600 * std.time.ns_per_s;
         const now_ns: i128 = std_compat.time.nanoTimestamp();
 
-        var dir = std_compat.fs.cwd().openDir(export_dir, .{ .iterate = true }) catch return 0;
+        var dir = fs_compat.openDirPath(export_dir, .{ .iterate = true }) catch return 0;
         defer dir.close();
 
         var deleted: u32 = 0;

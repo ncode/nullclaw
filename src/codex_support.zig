@@ -323,7 +323,7 @@ fn fileExists(path: []const u8) bool {
         file.close();
         return true;
     }
-    std_compat.fs.cwd().access(path, .{}) catch return false;
+    @import("fs_compat.zig").accessPath(path, .{}) catch return false;
     return true;
 }
 

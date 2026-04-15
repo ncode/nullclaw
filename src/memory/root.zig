@@ -2170,7 +2170,7 @@ test "initRuntime hygiene preserve enqueues vector sync when durable outbox is a
     defer std.testing.allocator.free(archive_path);
     try fs_compat.makePath(archive_path);
 
-    var archive_dir = try std_compat.fs.cwd().openDir(archive_path, .{});
+    var archive_dir = try fs_compat.openDirPath(archive_path, .{});
     defer archive_dir.close();
 
     var file = try archive_dir.createFile("old-memory.md", .{});

@@ -205,7 +205,7 @@ pub fn loadCredential(allocator: std.mem.Allocator, provider: []const u8) !?OAut
     const file_path = credentialFilePath(allocator) catch return null;
     defer allocator.free(file_path);
 
-    const file = std_compat.fs.cwd().openFile(file_path, .{}) catch return null;
+    const file = fs_compat.openPath(file_path, .{}) catch return null;
     defer file.close();
 
     const json_bytes = file.readToEndAlloc(allocator, 1024 * 1024) catch return null;
@@ -289,7 +289,7 @@ fn freeStoredToken(allocator: std.mem.Allocator, tok: StoredToken) void {
 }
 
 fn loadAllCredentials(allocator: std.mem.Allocator, file_path: []const u8) ?std.StringHashMap(StoredToken) {
-    const file = std_compat.fs.cwd().openFile(file_path, .{}) catch return null;
+    const file = fs_compat.openPath(file_path, .{}) catch return null;
     defer file.close();
 
     const json_bytes = file.readToEndAlloc(allocator, 1024 * 1024) catch return null;
@@ -927,4 +927,34 @@ test "credentialFilePathFromConfigDir appends auth.json" {
     defer std.testing.allocator.free(expected);
 
     try std.testing.expectEqualStrings(expected, path);
+}
+
+test "loadAllCredentials reads absolute auth path" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const abs = try @import("compat").fs.Dir.wrap(tmp_dir.dir).realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs);
+
+    const auth_path = try std_compat.fs.path.join(std.testing.allocator, &.{ abs, "auth.json" });
+    defer std.testing.allocator.free(auth_path);
+
+    const file = try fs_compat.createPath(auth_path, .{});
+    defer file.close();
+    try file.writeAll(
+        \\{"openai":{"access_token":"tok","expires_at":4102444800,"token_type":"Bearer"}}
+    );
+
+    var credentials = loadAllCredentials(std.testing.allocator, auth_path) orelse return error.TestUnexpectedResult;
+    defer {
+        var it = credentials.iterator();
+        while (it.next()) |entry| {
+            std.testing.allocator.free(entry.key_ptr.*);
+            freeStoredToken(std.testing.allocator, entry.value_ptr.*);
+        }
+        credentials.deinit();
+    }
+
+    const token = credentials.get("openai") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("tok", token.access_token);
 }

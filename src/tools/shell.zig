@@ -1,6 +1,7 @@
 const std = @import("std");
 const std_compat = @import("compat");
 const builtin = @import("builtin");
+const fs_compat = @import("../fs_compat.zig");
 const platform = @import("../platform.zig");
 const root = @import("root.zig");
 const Tool = root.Tool;
@@ -78,7 +79,7 @@ fn validatePathEnvValue(
         // Must be absolute
         if (!std_compat.fs.path.isAbsolute(component)) return false;
         // Resolve to canonical path (follows symlinks)
-        const resolved = std_compat.fs.cwd().realpathAlloc(allocator, component) catch
+        const resolved = fs_compat.realpathAllocPath(allocator, component) catch
             return false; // path doesn't exist or can't be resolved
         defer allocator.free(resolved);
         if (!isResolvedPathAllowed(allocator, resolved, ws_resolved, allowed_paths))
@@ -190,13 +191,13 @@ pub const ShellTool = struct {
             if (cwd.len == 0 or !std_compat.fs.path.isAbsolute(cwd))
                 return ToolResult.fail("cwd must be an absolute path");
             // Resolve and validate
-            const resolved_cwd = std_compat.fs.cwd().realpathAlloc(allocator, cwd) catch |err| {
+            const resolved_cwd = fs_compat.realpathAllocPath(allocator, cwd) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to resolve cwd: {}", .{err});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             };
             defer allocator.free(resolved_cwd);
 
-            const ws_resolved: ?[]const u8 = std_compat.fs.cwd().realpathAlloc(allocator, self.workspace_dir) catch null;
+            const ws_resolved: ?[]const u8 = fs_compat.realpathAllocPath(allocator, self.workspace_dir) catch null;
             defer if (ws_resolved) |wr| allocator.free(wr);
             if (ws_resolved == null and self.allowed_paths.len == 0)
                 return ToolResult.fail("cwd not allowed (workspace unavailable and no allowed_paths configured)");
@@ -208,10 +209,10 @@ pub const ShellTool = struct {
         } else self.workspace_dir;
 
         if (sandboxRestrictsToWorkspace(self.sandbox)) {
-            const resolved_cwd = std_compat.fs.cwd().realpathAlloc(allocator, effective_cwd) catch
+            const resolved_cwd = fs_compat.realpathAllocPath(allocator, effective_cwd) catch
                 return ToolResult.fail("sandboxed cwd must stay within workspace");
             defer allocator.free(resolved_cwd);
-            const ws_resolved = std_compat.fs.cwd().realpathAlloc(allocator, self.workspace_dir) catch
+            const ws_resolved = fs_compat.realpathAllocPath(allocator, self.workspace_dir) catch
                 return ToolResult.fail("sandboxed cwd must stay within workspace");
             defer allocator.free(ws_resolved);
 
@@ -234,7 +235,7 @@ pub const ShellTool = struct {
         // Add path-validated env vars: each delimiter-separated component
         // (`:` on Unix, `;` on Windows) must resolve within workspace or allowed_paths.
         if (self.path_env_vars.len > 0) {
-            const ws_resolved: ?[]const u8 = std_compat.fs.cwd().realpathAlloc(allocator, self.workspace_dir) catch null;
+            const ws_resolved: ?[]const u8 = fs_compat.realpathAllocPath(allocator, self.workspace_dir) catch null;
             defer if (ws_resolved) |wr| allocator.free(wr);
             const ws_for_check = ws_resolved orelse UNAVAILABLE_WORKSPACE_SENTINEL;
             const sandbox_allowed_paths = if (sandboxRestrictsToWorkspace(self.sandbox))

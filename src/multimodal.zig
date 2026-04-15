@@ -164,11 +164,7 @@ pub const DataUriImage = struct {
 /// Path is validated against `allowed_dirs` to prevent arbitrary file reads.
 pub fn readLocalImage(allocator: std.mem.Allocator, path: []const u8, config: MultimodalConfig) !ImageData {
     // Resolve to absolute path (realpathAlloc resolves ".." and symlinks)
-    const resolved = if (std_compat.fs.path.isAbsolute(path))
-        std_compat.fs.realpathAlloc(allocator, path) catch return error.PathNotFound
-    else blk: {
-        break :blk std_compat.fs.cwd().realpathAlloc(allocator, path) catch return error.PathNotFound;
-    };
+    const resolved = fs_compat.realpathAllocPath(allocator, path) catch return error.PathNotFound;
     defer allocator.free(resolved);
 
     // Verify the resolved path is within an allowed directory (skipped in yolo mode).

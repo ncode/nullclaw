@@ -720,7 +720,7 @@ pub fn listSkills(allocator: std.mem.Allocator, workspace_dir: []const u8, obser
         skills_list.deinit(allocator);
     }
 
-    const dir = std_compat.fs.cwd().openDir(skills_dir_path, .{ .iterate = true }) catch {
+    const dir = fs_compat.openDirPath(skills_dir_path, .{ .iterate = true }) catch {
         // Directory doesn't exist or can't be opened — return empty
         return try skills_list.toOwnedSlice(allocator);
     };
@@ -1079,10 +1079,7 @@ fn isTomlFile(path: []const u8) bool {
 }
 
 fn hasShellShebang(path: []const u8) bool {
-    var file = if (std_compat.fs.path.isAbsolute(path))
-        std_compat.fs.openFileAbsolute(path, .{}) catch return false
-    else
-        std_compat.fs.cwd().openFile(path, .{}) catch return false;
+    var file = fs_compat.openPath(path, .{}) catch return false;
     defer file.close();
 
     var buf: [128]u8 = undefined;
@@ -1195,10 +1192,7 @@ fn pathWithinRoot(path: []const u8, root: []const u8) bool {
 }
 
 fn isRegularFile(path: []const u8) bool {
-    var file = if (std_compat.fs.path.isAbsolute(path))
-        std_compat.fs.openFileAbsolute(path, .{}) catch return false
-    else
-        std_compat.fs.cwd().openFile(path, .{}) catch return false;
+    var file = fs_compat.openPath(path, .{}) catch return false;
     file.close();
     return true;
 }
@@ -1230,7 +1224,7 @@ fn auditMarkdownLinkTarget(
     const linked_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ source_parent, stripped });
     defer allocator.free(linked_path);
 
-    const linked_canonical = std_compat.fs.cwd().realpathAlloc(allocator, linked_path) catch
+    const linked_canonical = fs_compat.realpathAllocPath(allocator, linked_path) catch
         return error.SkillSecurityAuditFailed;
     defer allocator.free(linked_canonical);
 
@@ -1411,10 +1405,7 @@ fn pathIsSymlink(path: []const u8) !bool {
     const dir_path = std_compat.fs.path.dirname(path) orelse ".";
     const entry_name = std_compat.fs.path.basename(path);
 
-    var dir = if (std_compat.fs.path.isAbsolute(dir_path))
-        try std_compat.fs.openDirAbsolute(dir_path, .{})
-    else
-        try std_compat.fs.cwd().openDir(dir_path, .{});
+    var dir = try fs_compat.openDirPath(dir_path, .{});
     defer dir.close();
 
     var link_buf: [std_compat.fs.max_path_bytes]u8 = undefined;
@@ -1428,7 +1419,7 @@ fn pathIsSymlink(path: []const u8) !bool {
 
 fn auditSkillDirectory(allocator: std.mem.Allocator, root_dir_path: []const u8) !void {
     if (try pathIsSymlink(root_dir_path)) return error.SkillSecurityAuditFailed;
-    const canonical_root = std_compat.fs.cwd().realpathAlloc(allocator, root_dir_path) catch
+    const canonical_root = fs_compat.realpathAllocPath(allocator, root_dir_path) catch
         return error.SkillSecurityAuditFailed;
     defer allocator.free(canonical_root);
     if (!(try hasSkillMarkers(allocator, canonical_root))) return error.SkillSecurityAuditFailed;
@@ -1444,12 +1435,8 @@ fn auditSkillDirectory(allocator: std.mem.Allocator, root_dir_path: []const u8) 
         const current = stack.pop().?;
         defer allocator.free(current);
 
-        var dir = if (std_compat.fs.path.isAbsolute(current))
-            std_compat.fs.openDirAbsolute(current, .{ .iterate = true }) catch
-                return error.SkillSecurityAuditFailed
-        else
-            std_compat.fs.cwd().openDir(current, .{ .iterate = true }) catch
-                return error.SkillSecurityAuditFailed;
+        var dir = fs_compat.openDirPath(current, .{ .iterate = true }) catch
+            return error.SkillSecurityAuditFailed;
         defer dir.close();
 
         var it = dir.iterate();
@@ -1548,7 +1535,7 @@ fn pathExists(path: []const u8) bool {
         std_compat.fs.accessAbsolute(path, .{}) catch return false;
         return true;
     }
-    std_compat.fs.cwd().access(path, .{}) catch return false;
+    fs_compat.accessPath(path, .{}) catch return false;
     return true;
 }
 
@@ -1573,7 +1560,7 @@ fn isSkillMarkerBasename(base_name: []const u8) bool {
 }
 
 fn resolveInstallableSkillSourceRoot(allocator: std.mem.Allocator, source_path: []const u8) ![]u8 {
-    const source_abs = std_compat.fs.cwd().realpathAlloc(allocator, source_path) catch |err| switch (err) {
+    const source_abs = fs_compat.realpathAllocPath(allocator, source_path) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return error.ManifestNotFound,
         else => return err,
     };
@@ -1628,7 +1615,7 @@ fn copyDirRecursiveSecure(allocator: std.mem.Allocator, src_root: []const u8, ds
             std_compat.fs.openDirAbsolute(pair.src, .{ .iterate = true }) catch
                 return error.ReadError
         else
-            std_compat.fs.cwd().openDir(pair.src, .{ .iterate = true }) catch
+            fs_compat.openDirPath(pair.src, .{ .iterate = true }) catch
                 return error.ReadError;
         defer src_dir.close();
 
@@ -1722,7 +1709,7 @@ fn installSkillsFromRepositoryCollection(
         std_compat.fs.openDirAbsolute(collection_path, .{ .iterate = true }) catch
             return error.ManifestNotFound
     else
-        std_compat.fs.cwd().openDir(collection_path, .{ .iterate = true }) catch
+        fs_compat.openDirPath(collection_path, .{ .iterate = true }) catch
             return error.ManifestNotFound;
     defer collection_dir.close();
 
@@ -2013,16 +2000,10 @@ pub fn installSkillFromPath(allocator: std.mem.Allocator, source_path: []const u
 
 /// Copy a file from src to dst. Supports both absolute and relative paths.
 fn copyFilePath(src: []const u8, dst: []const u8) !void {
-    const src_file = if (std_compat.fs.path.isAbsolute(src))
-        try std_compat.fs.openFileAbsolute(src, .{})
-    else
-        try std_compat.fs.cwd().openFile(src, .{});
+    const src_file = try fs_compat.openPath(src, .{});
     defer src_file.close();
 
-    const dst_file = if (std_compat.fs.path.isAbsolute(dst))
-        try std_compat.fs.createFileAbsolute(dst, .{})
-    else
-        try std_compat.fs.cwd().createFile(dst, .{});
+    const dst_file = try fs_compat.createPath(dst, .{});
     defer dst_file.close();
 
     // Read and write in chunks
@@ -2074,7 +2055,7 @@ fn parseIntField(json: []const u8, key: []const u8) ?i64 {
 /// Read the last_sync timestamp from a marker file.
 /// Returns null if file doesn't exist or can't be parsed.
 fn readSyncMarker(marker_path: []const u8, buf: []u8) ?i64 {
-    const f = std_compat.fs.cwd().openFile(marker_path, .{}) catch return null;
+    const f = fs_compat.openPath(marker_path, .{}) catch return null;
     defer f.close();
     const n = f.read(buf) catch return null;
     if (n == 0) return null;
@@ -2167,7 +2148,7 @@ pub fn loadCommunitySkills(allocator: std.mem.Allocator, community_dir: []const 
         skills_list.deinit(allocator);
     }
 
-    const dir = std_compat.fs.cwd().openDir(community_dir, .{ .iterate = true }) catch {
+    const dir = fs_compat.openDirPath(community_dir, .{ .iterate = true }) catch {
         return try skills_list.toOwnedSlice(allocator);
     };
     var dir_mut = dir;
@@ -2263,7 +2244,7 @@ pub const SyncResult = struct {
 
 /// Count .md files in a directory (non-recursive).
 fn countMdFiles(dir_path: []const u8) u32 {
-    const dir = std_compat.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return 0;
+    const dir = fs_compat.openDirPath(dir_path, .{ .iterate = true }) catch return 0;
     var dir_mut = dir;
     defer dir_mut.close();
 

@@ -18,6 +18,7 @@ const daemon = @import("daemon.zig");
 const health = @import("health.zig");
 const Config = @import("config.zig").Config;
 const config_types = @import("config_types.zig");
+const fs_compat = @import("fs_compat.zig");
 const session_mod = @import("session.zig");
 const providers = @import("providers/root.zig");
 const http_util = @import("http_util.zig");
@@ -4859,7 +4860,7 @@ fn teamsStoreConversationRef(config: *const Config, service_url: []const u8, con
         .{ service_url, conversation_id },
     ) catch return;
 
-    const file = std_compat.fs.cwd().createFile(path, .{}) catch |err| {
+    const file = fs_compat.createPath(path, .{}) catch |err| {
         std.log.scoped(.teams).warn("Failed to save conversation reference: {}", .{err});
         return;
     };

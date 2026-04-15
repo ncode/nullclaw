@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const std_compat = @import("compat");
 const build_options = @import("build_options");
+const fs_compat = @import("fs_compat.zig");
 const embedded_wasm3_available = build_options.enable_embedded_wasm3;
 
 const c_wasm3 = if (embedded_wasm3_available) @cImport({
@@ -471,13 +472,7 @@ pub const WasmRuntime = struct {
 
     fn readModuleBytes(allocator: std.mem.Allocator, module_path: []const u8) ![]u8 {
         const MAX_MODULE_BYTES = 64 * 1024 * 1024;
-        if (std_compat.fs.path.isAbsolute(module_path)) {
-            const file = try std_compat.fs.openFileAbsolute(module_path, .{});
-            defer file.close();
-            return file.readToEndAlloc(allocator, MAX_MODULE_BYTES);
-        }
-
-        const file = try std_compat.fs.cwd().openFile(module_path, .{});
+        const file = try fs_compat.openPath(module_path, .{});
         defer file.close();
         return file.readToEndAlloc(allocator, MAX_MODULE_BYTES);
     }
@@ -595,11 +590,11 @@ fn resolveExecutableFromDirectory(
 }
 
 fn realpathIfExecutable(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
-    const stat = std_compat.fs.cwd().statFile(path) catch return null;
+    const stat = fs_compat.statPath(path) catch return null;
     if (stat.kind != .file) return null;
     if (builtin.os.tag != .windows and (stat.mode & 0o111) == 0) return null;
 
-    return std_compat.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
+    return fs_compat.realpathAllocPath(allocator, path) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return null,
     };

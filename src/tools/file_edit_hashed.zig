@@ -117,7 +117,7 @@ pub const FileEditHashedTool = struct {
 
         const ws_path = path_info.workspacePath();
 
-        const resolved = std_compat.fs.cwd().realpathAlloc(allocator, path_info.full_path) catch |err| {
+        const resolved = fs_compat.realpathAllocPath(allocator, path_info.full_path) catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "Failed to resolve file path: {} ({s})", .{ err, path });
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };

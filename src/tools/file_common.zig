@@ -1,5 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
+const fs_compat = @import("../fs_compat.zig");
 const bootstrap_mod = @import("../bootstrap/root.zig");
 const isPathSafe = @import("path_security.zig").isPathSafe;
 
@@ -40,7 +41,7 @@ pub fn prepareWorkspacePath(
     };
     errdefer allocator.free(full_path);
 
-    const workspace_resolved = std_compat.fs.cwd().realpathAlloc(allocator, workspace_dir) catch null;
+    const workspace_resolved = fs_compat.realpathAllocPath(allocator, workspace_dir) catch null;
     errdefer if (workspace_resolved) |resolved| allocator.free(resolved);
 
     return .{
@@ -50,7 +51,7 @@ pub fn prepareWorkspacePath(
 }
 
 pub fn resolveNearestExistingAncestor(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    return std_compat.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
+    return fs_compat.realpathAllocPath(allocator, path) catch |err| switch (err) {
         error.FileNotFound => {
             const parent = std_compat.fs.path.dirname(path) orelse return err;
             if (std.mem.eql(u8, parent, path)) return err;
@@ -74,7 +75,7 @@ pub fn isSymlinkPath(path: []const u8) !bool {
     var dir = if (std_compat.fs.path.isAbsolute(dir_path))
         try std_compat.fs.openDirAbsolute(dir_path, .{})
     else
-        try std_compat.fs.cwd().openDir(dir_path, .{});
+        try fs_compat.openDirPath(dir_path, .{});
     defer dir.close();
 
     var link_buf: [std_compat.fs.max_path_bytes]u8 = undefined;

@@ -148,13 +148,13 @@ fn ensure_parent_dir(path: []const u8) !void {
 }
 
 fn file_exists(path: []const u8) bool {
-    const file = std_compat.fs.cwd().openFile(path, .{}) catch return false;
+    const file = fs_compat.openPath(path, .{}) catch return false;
     file.close();
     return true;
 }
 
 fn read_file_if_present(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
-    const file = std_compat.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+    const file = fs_compat.openPath(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -164,7 +164,7 @@ fn read_file_if_present(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
 
 fn write_file_truncate(path: []const u8, content: []const u8) !void {
     try ensure_parent_dir(path);
-    const file = try std_compat.fs.cwd().createFile(path, .{ .truncate = true });
+    const file = try fs_compat.createPath(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(content);
 }
@@ -172,7 +172,7 @@ fn write_file_truncate(path: []const u8, content: []const u8) !void {
 fn write_if_missing(path: []const u8, content: []const u8) !bool {
     if (file_exists(path)) return false;
     try ensure_parent_dir(path);
-    const file = try std_compat.fs.cwd().createFile(path, .{ .exclusive = true });
+    const file = try fs_compat.createPath(path, .{ .exclusive = true });
     defer file.close();
     try file.writeAll(content);
     return true;
@@ -180,7 +180,7 @@ fn write_if_missing(path: []const u8, content: []const u8) !bool {
 
 fn append_line(path: []const u8, line: []const u8, allocator: std.mem.Allocator) !void {
     try ensure_parent_dir(path);
-    const file = try std_compat.fs.cwd().createFile(path, .{ .truncate = false, .read = true });
+    const file = try fs_compat.createPath(path, .{ .truncate = false, .read = true });
     defer file.close();
 
     const stat = try fs_compat.stat(file);

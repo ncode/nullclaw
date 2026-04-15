@@ -1,5 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
+const fs_compat = @import("../fs_compat.zig");
 const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
@@ -130,12 +131,12 @@ pub const GitTool = struct {
         const effective_cwd = if (root.getString(args, "cwd")) |cwd| blk: {
             if (cwd.len == 0 or !std_compat.fs.path.isAbsolute(cwd))
                 return ToolResult.fail("cwd must be an absolute path");
-            const resolved_cwd = std_compat.fs.cwd().realpathAlloc(allocator, cwd) catch |err| {
+            const resolved_cwd = fs_compat.realpathAllocPath(allocator, cwd) catch |err| {
                 const err_msg = try std.fmt.allocPrint(allocator, "Failed to resolve cwd: {}", .{err});
                 return ToolResult{ .success = false, .output = "", .error_msg = err_msg };
             };
             defer allocator.free(resolved_cwd);
-            const ws_resolved: ?[]const u8 = std_compat.fs.cwd().realpathAlloc(allocator, self.workspace_dir) catch null;
+            const ws_resolved: ?[]const u8 = fs_compat.realpathAllocPath(allocator, self.workspace_dir) catch null;
             defer if (ws_resolved) |wr| allocator.free(wr);
             if (ws_resolved == null and self.allowed_paths.len == 0)
                 return ToolResult.fail("cwd not allowed (workspace unavailable and no allowed_paths configured)");

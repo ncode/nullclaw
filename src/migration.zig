@@ -409,7 +409,7 @@ fn readOpenclawMarkdownEntries(
     const daily_dir = try std.fmt.allocPrint(allocator, "{s}/memory", .{source});
     defer allocator.free(daily_dir);
 
-    if (std_compat.fs.cwd().openDir(daily_dir, .{ .iterate = true })) |*dir_handle| {
+    if (fs_compat.openDirPath(daily_dir, .{ .iterate = true })) |*dir_handle| {
         var dir = dir_handle.*;
         defer dir.close();
         var iter = dir.iterate();
@@ -518,7 +518,7 @@ fn readBrainDbEntries(
 
         // Check file exists before attempting open
         const abs_path = db_path[0..db_path.len];
-        std_compat.fs.cwd().access(abs_path, .{}) catch continue;
+        fs_compat.accessPath(abs_path, .{}) catch continue;
 
         const sqlite_entries = migrate_mod.readBrainDb(allocator, db_path) catch |err| {
             log.warn("brain.db read failed at {s}: {}", .{ abs_path, err });

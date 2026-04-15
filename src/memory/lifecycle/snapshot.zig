@@ -55,7 +55,7 @@ pub fn exportSnapshot(allocator: std.mem.Allocator, mem: Memory, workspace_dir: 
     const snapshot_path = try std_compat.fs.path.join(allocator, &.{ workspace_dir, SNAPSHOT_FILENAME });
     defer allocator.free(snapshot_path);
 
-    const file = try std_compat.fs.cwd().createFile(snapshot_path, .{});
+    const file = try fs_compat.createPath(snapshot_path, .{});
     defer file.close();
 
     try file.writeAll(json_buf.items);
@@ -144,7 +144,7 @@ pub fn shouldHydrate(allocator: std.mem.Allocator, mem: ?Memory, workspace_dir: 
     const snapshot_path = std_compat.fs.path.join(allocator, &.{ workspace_dir, SNAPSHOT_FILENAME }) catch return false;
     defer allocator.free(snapshot_path);
 
-    std_compat.fs.cwd().access(snapshot_path, .{}) catch return false;
+    fs_compat.accessPath(snapshot_path, .{}) catch return false;
     return true;
 }
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
+const fs_compat = @import("../fs_compat.zig");
 const root = @import("root.zig");
 const config_types = @import("../config_types.zig");
 const bus_mod = @import("../bus.zig");
@@ -289,7 +290,7 @@ pub const TeamsChannel = struct {
         try root.appendJsonStringW(bw, conversation_id);
         try bw.writeByte('}');
 
-        const file = try std_compat.fs.cwd().createFile(path, .{});
+        const file = try fs_compat.createPath(path, .{});
         defer file.close();
         try file.writeAll(body_list.items);
 
@@ -303,7 +304,7 @@ pub const TeamsChannel = struct {
         try path_writer.print("{s}/teams_conversation_ref.json", .{config_dir});
         const path = path_writer.buffered();
 
-        const file = std_compat.fs.cwd().openFile(path, .{}) catch |err| {
+        const file = fs_compat.openPath(path, .{}) catch |err| {
             if (err == error.FileNotFound) {
                 log.debug("No Teams conversation reference file found", .{});
                 return;
