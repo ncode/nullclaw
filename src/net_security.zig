@@ -55,22 +55,26 @@ pub fn hostMatchesAllowlist(host: []const u8, allowed: []const []const u8) bool 
     return false;
 }
 
+/// Container runtimes commonly expose the host bridge under a fixed DNS alias.
+pub fn isContainerRuntimeHostAlias(host: []const u8) bool {
+    const bare = stripHostBrackets(host);
+    const unscoped = stripIpv6ZoneId(bare);
+
+    return std.ascii.eqlIgnoreCase(unscoped, "host.docker.internal") or
+        std.ascii.eqlIgnoreCase(unscoped, "host.containers.internal");
+}
+
 /// SSRF: check if host is localhost or a private/reserved IP.
 pub fn isLocalHost(host: []const u8) bool {
-    // Strip brackets from IPv6 addresses like [::1]
-    const bare = if (std.mem.startsWith(u8, host, "[") and std.mem.endsWith(u8, host, "]"))
-        host[1 .. host.len - 1]
-    else
-        host;
-
-    // Drop IPv6 zone id suffix (e.g. "fe80::1%lo0" or "fe80::1%25lo0").
-    const unscoped = if (std.mem.indexOfScalar(u8, bare, '%')) |pct| bare[0..pct] else bare;
+    const bare = stripHostBrackets(host);
+    const unscoped = stripIpv6ZoneId(bare);
     if (unscoped.len == 0) return true;
 
     if (std.mem.eql(u8, unscoped, "localhost")) return true;
     if (std.mem.endsWith(u8, unscoped, ".localhost")) return true;
     // .local TLD
     if (std.mem.endsWith(u8, unscoped, ".local")) return true;
+    if (isContainerRuntimeHostAlias(unscoped)) return true;
 
     // Try to parse as IPv4
     if (parseIpv4(unscoped)) |octets| {
@@ -579,6 +583,11 @@ test "isLocalHost detects 127.x.x.x range" {
 
 test "isLocalHost detects .local TLD" {
     try std.testing.expect(isLocalHost("myhost.local"));
+}
+
+test "isLocalHost detects container runtime host aliases" {
+    try std.testing.expect(isLocalHost("host.docker.internal"));
+    try std.testing.expect(isLocalHost("host.containers.internal"));
 }
 
 test "isNonGlobalV4 blocks 169.254.x.x link-local" {

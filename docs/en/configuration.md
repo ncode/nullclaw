@@ -91,7 +91,7 @@ The example below is enough to run local CLI mode (replace API key):
 - Controls runtime diagnostics and observability output.
 - For OpenTelemetry, use the nested `diagnostics.otel` object.
 - OTEL spans are flushed at natural runtime boundaries such as turn completion and agent shutdown, with batch flushing still used as a fallback for longer-running flows.
-- OTEL endpoints should use HTTPS. Plain HTTP is appropriate only for localhost/private collectors.
+- OTEL endpoints should use HTTPS. Plain HTTP is appropriate only for localhost/private collectors or container-local targets such as `host.docker.internal`, `host.containers.internal`, or single-label service names like `otel`.
 
 Example:
 

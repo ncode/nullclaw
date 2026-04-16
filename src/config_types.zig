@@ -140,7 +140,8 @@ pub const DiagnosticsConfig = struct {
     token_usage_ledger_max_lines: u64 = 0,
 
     /// OTLP endpoint must be an absolute HTTPS URL, or a local/private HTTP URL
-    /// when exporting to a collector on the same machine or private network.
+    /// when exporting to a collector on the same machine, private network, or
+    /// container runtime bridge.
     pub fn isValidOtelEndpoint(raw: []const u8) bool {
         var trimmed = std.mem.trim(u8, raw, " \t\r\n");
         while (trimmed.len > 0 and trimmed[trimmed.len - 1] == '/') {
@@ -187,13 +188,11 @@ pub const DiagnosticsConfig = struct {
         if (bare.len == 0) return false;
 
         // Container networks commonly expose services by a single-label DNS
-        // name such as `otel`, and container runtimes expose host bridges with
-        // names like `host.containers.internal`. Allow plaintext OTEL only for
-        // these local runtime naming conventions.
+        // name such as `otel`. Keep the plaintext OTEL exception scoped to
+        // runtime-local service names rather than broader dotted domains.
         if (std.mem.indexOfScalar(u8, bare, '.') == null and std.mem.indexOfScalar(u8, bare, ':') == null) {
             return true;
         }
-        if (std.mem.endsWith(u8, bare, ".internal")) return true;
 
         return false;
     }
@@ -1845,6 +1844,8 @@ test "McpServerConfig http url validation" {
     try std.testing.expect(McpServerConfig.isValidHttpUrl("http://localhost:6000/mcp"));
     try std.testing.expect(McpServerConfig.isValidHttpUrl("http://foo.localhost:6000/mcp"));
     try std.testing.expect(McpServerConfig.isValidHttpUrl("http://mcp.local:6000/mcp"));
+    try std.testing.expect(McpServerConfig.isValidHttpUrl("http://host.docker.internal:6000/mcp"));
+    try std.testing.expect(McpServerConfig.isValidHttpUrl("http://host.containers.internal:6000/mcp"));
     try std.testing.expect(McpServerConfig.isValidHttpUrl("http://127.0.0.1:6000/mcp"));
     try std.testing.expect(McpServerConfig.isValidHttpUrl("http://10.0.0.1:8080/rpc"));
     try std.testing.expect(McpServerConfig.isValidHttpUrl("http://192.168.1.1:8080/rpc"));
@@ -1869,8 +1870,10 @@ test "DiagnosticsConfig otel endpoint validation" {
     try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://127.0.0.1:4318"));
     try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://10.0.0.5:4318"));
     try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://otel:4318"));
+    try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://host.docker.internal:4318"));
     try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://host.containers.internal:4318"));
     try std.testing.expect(!DiagnosticsConfig.isValidOtelEndpoint("http://otel.example.com:4318"));
+    try std.testing.expect(!DiagnosticsConfig.isValidOtelEndpoint("http://otel.example.internal:4318"));
     try std.testing.expect(!DiagnosticsConfig.isValidOtelEndpoint("https://otel.example.com?x=1"));
     try std.testing.expect(!DiagnosticsConfig.isValidOtelEndpoint("https://otel.example.com#frag"));
     try std.testing.expect(!DiagnosticsConfig.isValidOtelEndpoint("ftp://otel.example.com"));
@@ -2000,6 +2003,8 @@ test "HttpRequestConfig search base URL validation" {
     try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://localhost:8888/search/"));
     try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://192.168.1.10:8888/search"));
     try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://searx.local/search"));
+    try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://host.docker.internal:8888/search"));
+    try std.testing.expect(HttpRequestConfig.isValidSearchBaseUrl("http://host.containers.internal:8888/search"));
 
     try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("ftp://searx.example.com"));
     try std.testing.expect(!HttpRequestConfig.isValidSearchBaseUrl("https://"));

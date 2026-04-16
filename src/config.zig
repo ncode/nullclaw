@@ -1586,7 +1586,7 @@ pub const Config = struct {
             ValidationError.InvalidBackoffMs => std.debug.print("Config error: provider_backoff_ms must be <= 600000.\n", .{}),
             ValidationError.InvalidHttpProxyUrl => std.debug.print("Config error: http_request.proxy must be a non-empty http://, https://, or socks5:// URL.\n", .{}),
             ValidationError.InvalidApiErrorMaxChars => std.debug.print("Config error: diagnostics.api_error_max_chars must be in [200, 10000].\n", .{}),
-            ValidationError.InvalidOtelEndpoint => std.debug.print("Config error: diagnostics.otel.endpoint/otel_endpoint must be an absolute https:// URL (or http:// for localhost/private hosts).\n", .{}),
+            ValidationError.InvalidOtelEndpoint => std.debug.print("Config error: diagnostics.otel.endpoint/otel_endpoint must be an absolute https:// URL (or http:// for localhost/private or container-local collector hosts).\n", .{}),
             ValidationError.InvalidHttpSearchBaseUrl => std.debug.print("Config error: http_request.search_base_url must be https://host[/search] or local http://host[:port][/search] (no query/fragment).\n", .{}),
             ValidationError.InvalidHttpSearchProvider => std.debug.print("Config error: http_request.search_provider must be one of: auto, searxng, duckduckgo(ddg), brave, firecrawl, tavily, perplexity, exa, jina.\n", .{}),
             ValidationError.InvalidHttpSearchFallbackProvider => std.debug.print("Config error: http_request.search_fallback_providers entries must be valid providers and cannot be 'auto'.\n", .{}),
@@ -2939,6 +2939,9 @@ test "validation accepts container-local diagnostics otel endpoint over plain ht
     cfg.diagnostics.otel_endpoint = "http://otel:4318";
     try cfg.validate();
 
+    cfg.diagnostics.otel_endpoint = "http://host.docker.internal:4318";
+    try cfg.validate();
+
     cfg.diagnostics.otel_endpoint = "http://host.containers.internal:4318";
     try cfg.validate();
 }
@@ -2952,6 +2955,11 @@ test "validation rejects remote diagnostics otel endpoint over plain http" {
     };
     // Regression: OTEL config must not silently allow remote plaintext exporters.
     cfg.diagnostics.otel_endpoint = "http://otel.example.com:4318";
+    try std.testing.expectError(Config.ValidationError.InvalidOtelEndpoint, cfg.validate());
+
+    // Regression: keep the container-runtime exception narrow; dotted internal
+    // domains are not necessarily local collectors.
+    cfg.diagnostics.otel_endpoint = "http://otel.example.internal:4318";
     try std.testing.expectError(Config.ValidationError.InvalidOtelEndpoint, cfg.validate());
 }
 
