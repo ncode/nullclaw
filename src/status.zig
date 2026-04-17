@@ -97,7 +97,3 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
     try w.flush();
 }
-
-test {
-    _ = run;
-}

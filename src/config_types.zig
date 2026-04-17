@@ -1498,8 +1498,9 @@ pub const HttpRequestConfig = struct {
     /// Allowed forms:
     ///   - https://host
     ///   - https://host/search
-    ///   - http://localhost[:port]
-    ///   - http://localhost[:port]/search
+    ///   - http://localhost[:port][/search]
+    ///   - http://192.168.1.10[:port][/search]
+    ///   - http://searx.local[:port][/search]
     pub fn isValidSearchBaseUrl(raw: []const u8) bool {
         return search_base_url.isValid(raw);
     }
