@@ -700,17 +700,26 @@ fn runChannel(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
 
     if (std.mem.eql(u8, subcmd, "list")) {
         if (wants_json) {
-            const snapshot = yc.health.snapshot(allocator) catch |err| {
-                writeJsonError("channel_health_failed", "Failed to read channel health", null);
-                std.debug.print("Failed to read channel health: {s}\n", .{@errorName(err)});
-                std_compat.process.exit(1);
-            };
-            defer snapshot.deinit(allocator);
+            const items = blk: {
+                if (tryReadGatewayRuntimeStatusJson(allocator)) |runtime_status_json| {
+                    defer allocator.free(runtime_status_json);
+                    if (yc.channel_admin.collectConfiguredChannelsFromRuntimeStatusJson(allocator, &cfg.channels, runtime_status_json)) |live_items| {
+                        break :blk live_items;
+                    } else |_| {}
+                }
 
-            const items = yc.channel_admin.collectConfiguredChannels(allocator, &cfg.channels, snapshot) catch |err| {
-                writeJsonError("channel_list_failed", "Failed to build channel list", null);
-                std.debug.print("Failed to build channel list: {s}\n", .{@errorName(err)});
-                std_compat.process.exit(1);
+                const snapshot = yc.health.snapshot(allocator) catch |err| {
+                    writeJsonError("channel_health_failed", "Failed to read channel health", null);
+                    std.debug.print("Failed to read channel health: {s}\n", .{@errorName(err)});
+                    std_compat.process.exit(1);
+                };
+                defer snapshot.deinit(allocator);
+
+                break :blk yc.channel_admin.collectConfiguredChannels(allocator, &cfg.channels, snapshot) catch |err| {
+                    writeJsonError("channel_list_failed", "Failed to build channel list", null);
+                    std.debug.print("Failed to build channel list: {s}\n", .{@errorName(err)});
+                    std_compat.process.exit(1);
+                };
             };
             defer allocator.free(items);
 
@@ -739,21 +748,30 @@ fn runChannel(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
             std_compat.process.exit(1);
         }
 
-        const snapshot = yc.health.snapshot(allocator) catch |err| {
-            if (hasJsonFlag(sub_args[2..])) writeJsonError("channel_health_failed", "Failed to read channel health", null);
-            std.debug.print("Failed to read channel health: {s}\n", .{@errorName(err)});
-            std_compat.process.exit(1);
-        };
-        defer snapshot.deinit(allocator);
+        var detail = blk: {
+            if (tryReadGatewayRuntimeStatusJson(allocator)) |runtime_status_json| {
+                defer allocator.free(runtime_status_json);
+                if (yc.channel_admin.readChannelTypeDetailFromRuntimeStatusJson(allocator, &cfg.channels, runtime_status_json, sub_args[1])) |live_detail_opt| {
+                    if (live_detail_opt) |live_detail| break :blk live_detail;
+                } else |_| {}
+            }
 
-        var detail = yc.channel_admin.readChannelTypeDetail(allocator, &cfg.channels, snapshot, sub_args[1]) catch |err| {
-            if (hasJsonFlag(sub_args[2..])) writeJsonError("channel_detail_failed", "Failed to read channel detail", null);
-            std.debug.print("Failed to read channel detail: {s}\n", .{@errorName(err)});
-            std_compat.process.exit(1);
-        } orelse {
-            if (hasJsonFlag(sub_args[2..])) writeJsonError("channel_type_not_found", "Unknown channel type", null);
-            std.debug.print("Unknown channel type: {s}\n", .{sub_args[1]});
-            std_compat.process.exit(1);
+            const snapshot = yc.health.snapshot(allocator) catch |err| {
+                if (hasJsonFlag(sub_args[2..])) writeJsonError("channel_health_failed", "Failed to read channel health", null);
+                std.debug.print("Failed to read channel health: {s}\n", .{@errorName(err)});
+                std_compat.process.exit(1);
+            };
+            defer snapshot.deinit(allocator);
+
+            break :blk yc.channel_admin.readChannelTypeDetail(allocator, &cfg.channels, snapshot, sub_args[1]) catch |err| {
+                if (hasJsonFlag(sub_args[2..])) writeJsonError("channel_detail_failed", "Failed to read channel detail", null);
+                std.debug.print("Failed to read channel detail: {s}\n", .{@errorName(err)});
+                std_compat.process.exit(1);
+            } orelse {
+                if (hasJsonFlag(sub_args[2..])) writeJsonError("channel_type_not_found", "Unknown channel type", null);
+                std.debug.print("Unknown channel type: {s}\n", .{sub_args[1]});
+                std_compat.process.exit(1);
+            };
         };
         defer detail.deinit(allocator);
 
@@ -814,6 +832,19 @@ fn runChannel(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
     } else {
         std.debug.print("Unknown channel command: {s}\n", .{subcmd});
         std_compat.process.exit(1);
+    }
+}
+
+fn tryReadGatewayRuntimeStatusJson(allocator: std.mem.Allocator) ?[]const u8 {
+    switch (yc.cron.requestGatewayGet(allocator, "/status")) {
+        .unavailable => return null,
+        .response => |resp| {
+            if (resp.status_code >= 200 and resp.status_code < 300) {
+                return resp.body;
+            }
+            allocator.free(resp.body);
+            return null;
+        },
     }
 }
 
