@@ -66,6 +66,8 @@ const WORKSPACE_IDENTITY_TEMPLATE = @embedFile("workspace_templates/IDENTITY.md"
 const WORKSPACE_USER_TEMPLATE = @embedFile("workspace_templates/USER.md");
 const WORKSPACE_HEARTBEAT_TEMPLATE = @embedFile("workspace_templates/HEARTBEAT.md");
 const WORKSPACE_BOOTSTRAP_TEMPLATE = @embedFile("workspace_templates/BOOTSTRAP.md");
+const MODELS_REFRESH_TIMEOUT_SECS = "10";
+const MODELS_REFRESH_MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 // ── Project context ──────────────────────────────────────────────
 
 pub const ProjectContext = struct {
@@ -2457,6 +2459,20 @@ const catalog_providers = [_]ModelsCatalogProvider{
     .{ .name = "openrouter", .url = "https://openrouter.ai/api/v1/models", .models_path = "data", .id_field = "id" },
 };
 
+const ModelsRefreshFetchOptions = struct {
+    timeout_secs: []const u8 = MODELS_REFRESH_TIMEOUT_SECS,
+    max_output_bytes: usize = MODELS_REFRESH_MAX_OUTPUT_BYTES,
+};
+
+fn buildModelsRefreshFetchOptions() ModelsRefreshFetchOptions {
+    return .{};
+}
+
+fn fetchModelsRefreshCatalog(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+    const options = buildModelsRefreshFetchOptions();
+    return http_util.curlGetMaxBytes(allocator, url, &.{}, options.timeout_secs, options.max_output_bytes);
+}
+
 /// Refresh the model catalog by fetching available models from known providers.
 /// Saves results to models_cache.json in the config directory.
 pub fn runModelsRefresh(allocator: std.mem.Allocator) !void {
@@ -2498,26 +2514,23 @@ pub fn runModelsRefresh(allocator: std.mem.Allocator) !void {
         try out.print("  Fetching from {s}...\n", .{cp.name});
         try out.flush();
 
-        // Run curl to fetch models list
-        const result = std_compat.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{ "curl", "-sf", "--max-time", "10", cp.url },
-        }) catch {
+        // Run curl to fetch models list through the shared HTTP helper so the
+        // response size cap stays explicit without duplicating subprocess logic.
+        const response_body = fetchModelsRefreshCatalog(allocator, cp.url) catch {
             try out.print("  [SKIP] {s}: curl failed\n", .{cp.name});
             try out.flush();
             continue;
         };
-        defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
+        defer allocator.free(response_body);
 
-        if (result.stdout.len == 0) {
+        if (response_body.len == 0) {
             try out.print("  [SKIP] {s}: empty response\n", .{cp.name});
             try out.flush();
             continue;
         }
 
         // Parse JSON and extract model IDs
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, result.stdout, .{}) catch {
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, response_body, .{}) catch {
             try out.print("  [SKIP] {s}: invalid JSON\n", .{cp.name});
             try out.flush();
             continue;
@@ -4297,6 +4310,13 @@ test "catalog_providers names are unique" {
             try std.testing.expect(!std.mem.eql(u8, cp1.name, cp2.name));
         }
     }
+}
+
+test "buildModelsRefreshFetchOptions sets output budget for large provider catalogs" {
+    const options = buildModelsRefreshFetchOptions();
+    try std.testing.expectEqualStrings(MODELS_REFRESH_TIMEOUT_SECS, options.timeout_secs);
+    try std.testing.expectEqual(@as(usize, MODELS_REFRESH_MAX_OUTPUT_BYTES), options.max_output_bytes);
+    try std.testing.expect(options.max_output_bytes > 400_000);
 }
 
 test "known_providers includes gemini-cli" {
