@@ -2734,29 +2734,3 @@ test "parseJson keeps fallback-only custom url provider refs in defaults" {
     try std.testing.expect(cfg.default_model != null);
     try std.testing.expectEqualStrings("custom-model", cfg.default_model.?);
 }
-h = "/tmp/config.json",
-        .allocator = allocator,
-    };
-
-    const json =
-        \\{
-        \\  "reliability": {
-        \\    "fallback_providers": [
-        \\      "custom:https://fb.example.com/qianfan"
-        \\    ]
-        \\  },
-        \\  "agents": {
-        \\    "defaults": {
-        \\      "model": {
-        \\        "primary": "custom:https://fb.example.com/qianfan/custom-model"
-        \\      }
-        \\    }
-        \\  }
-        \\}
-    ;
-
-    try cfg.parseJson(json);
-    try std.testing.expectEqualStrings("custom:https://fb.example.com/qianfan", cfg.default_provider);
-    try std.testing.expect(cfg.default_model != null);
-    try std.testing.expectEqualStrings("custom-model", cfg.default_model.?);
-}
