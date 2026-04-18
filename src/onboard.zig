@@ -1636,6 +1636,10 @@ fn configureMatrixChannel(cfg: *Config, out: *std.Io.Writer, _: []u8, prefix: []
     try out.print("{s}  Matrix user ID (optional, for typing indicators): ", .{prefix});
     const user_id = prompt(out, &user_id_buf, "", "") orelse return false;
 
+    var pantalaimon_buf: [512]u8 = undefined;
+    try out.print("{s}  Pantalaimon proxy URL for E2EE (optional, e.g. http://localhost:8008): ", .{prefix});
+    const pantalaimon = prompt(out, &pantalaimon_buf, "", "") orelse return false;
+
     const accounts = try cfg.allocator.alloc(config_mod.MatrixConfig, 1);
     accounts[0] = .{
         .account_id = "default",
@@ -1643,10 +1647,12 @@ fn configureMatrixChannel(cfg: *Config, out: *std.Io.Writer, _: []u8, prefix: []
         .access_token = try cfg.allocator.dupe(u8, access_token),
         .room_id = try cfg.allocator.dupe(u8, room_id),
         .user_id = if (user_id.len > 0) try cfg.allocator.dupe(u8, user_id) else null,
+        .pantalaimon_proxy_url = if (pantalaimon.len > 0) try cfg.allocator.dupe(u8, pantalaimon) else null,
         .allow_from = &[_][]const u8{"*"},
     };
     cfg.channels.matrix = accounts;
-    try out.print("{s}  -> Matrix configured (allow_from=*)\n", .{prefix});
+    const e2ee_note: []const u8 = if (pantalaimon.len > 0) " + E2EE via pantalaimon" else "";
+    try out.print("{s}  -> Matrix configured (allow_from=*{s})\n", .{ prefix, e2ee_note });
     return true;
 }
 

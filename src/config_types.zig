@@ -574,6 +574,11 @@ pub const MatrixConfig = struct {
     dm_policy: []const u8 = "allowlist",
     group_policy: []const u8 = "allowlist",
     require_mention: bool = false,
+    /// Optional pantalaimon E2EE proxy URL (e.g. "http://localhost:8008").
+    /// When set, all Matrix API requests are routed through the proxy instead
+    /// of directly to the homeserver. The homeserver field is still required
+    /// for display and onboarding purposes.
+    pantalaimon_proxy_url: ?[]const u8 = null,
 };
 
 pub const MattermostConfig = struct {
