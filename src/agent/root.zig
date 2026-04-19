@@ -75,6 +75,10 @@ pub const ProgressSink = struct {
     }
 };
 
+/// Callback invoked at each tool-loop boundary to drain a pending mid-turn injection.
+/// Returns an owned slice allocated with the provided allocator, or null if empty.
+pub const DrainCallback = *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) ?[]u8;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Agent
 // ═══════════════════════════════════════════════════════════════════════════
@@ -171,7 +175,7 @@ pub const Agent = struct {
         }
     };
 
-    const QueueMode = enum {
+    pub const QueueMode = enum {
         off,
         serial,
         latest,
@@ -357,6 +361,12 @@ pub const Agent = struct {
     progress_callback: ?ProgressCallback = null,
     /// Context pointer passed to progress_callback.
     progress_ctx: ?*anyopaque = null,
+    /// Optional mid-turn injection drain. When set, called at each tool-loop boundary
+    /// to pull a pending user message and fold it into the active turn.
+    /// Returns an owned slice (allocated with the agent allocator) or null if empty.
+    drain_injection_cb: ?DrainCallback = null,
+    /// Context pointer passed to drain_injection_cb.
+    drain_injection_ctx: ?*anyopaque = null,
     /// Optional callback invoked for each LLM response usage record.
     usage_record_callback: ?UsageRecordCallback = null,
     /// Context pointer passed to usage_record_callback.
@@ -1850,6 +1860,15 @@ pub const Agent = struct {
         while (iteration < self.max_tool_iterations) : (iteration += 1) {
             if (self.isInterruptRequested()) {
                 return self.interruptedReply();
+            }
+
+            // Drain any mid-turn injection at each tool boundary.
+            if (self.drain_injection_cb) |drain_cb| {
+                if (self.drain_injection_ctx) |drain_ctx| {
+                    if (drain_cb(drain_ctx, self.allocator)) |injected| {
+                        try self.appendOwnedHistoryMessage(.{ .role = .user, .content = injected });
+                    }
+                }
             }
 
             _ = iter_arena.reset(.retain_capacity);

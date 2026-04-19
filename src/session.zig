@@ -28,6 +28,7 @@ const util = @import("util.zig");
 const onboard = @import("onboard.zig");
 const bootstrap_mod = @import("bootstrap/root.zig");
 const observability = @import("observability.zig");
+const inbound_router = @import("inbound_router.zig");
 const Observer = observability.Observer;
 const tools_mod = @import("tools/root.zig");
 const cron_mod = @import("cron.zig");
@@ -176,13 +177,35 @@ pub const Session = struct {
     turn_count: u64,
     turn_running: std.atomic.Value(bool),
     mutex: std_compat.sync.Mutex,
+    /// Protects injection_pending independently of the session turn mutex.
+    injection_mu: std_compat.sync.Mutex = .{},
+    /// Pending mid-turn message; owned by the SessionManager allocator.
+    injection_pending: ?[]u8 = null,
 
     pub fn deinit(self: *Session, allocator: Allocator) void {
         self.agent.deinit();
         if (self.provider_holder) |*holder| holder.deinit();
         if (self.owned_provider_api_key) |key| allocator.free(key);
         if (self.owned_memory_session_id) |sid| allocator.free(sid);
+        if (self.injection_pending) |p| allocator.free(p);
         allocator.free(self.session_key);
+    }
+
+    /// Deposit text in the injection buffer (replaces any existing pending injection).
+    /// Must be called with the SM allocator, NOT while holding session.mutex.
+    pub fn injectMidTurn(self: *Session, allocator: Allocator, text: []const u8) !void {
+        const duped = try allocator.dupe(u8, text);
+        self.injection_mu.lock();
+        defer self.injection_mu.unlock();
+        if (self.injection_pending) |old| allocator.free(old);
+        self.injection_pending = duped;
+    }
+
+    /// Returns true if there is a pending injection (lock-free snapshot).
+    pub fn hasInjection(self: *Session) bool {
+        self.injection_mu.lock();
+        defer self.injection_mu.unlock();
+        return self.injection_pending != null;
     }
 };
 
@@ -1734,6 +1757,32 @@ pub const SessionManager = struct {
             session.agent.progress_ctx = null;
         }
 
+        const DrainCtx = struct {
+            session: *Session,
+            sm_allocator: Allocator,
+
+            fn callback(ctx: *anyopaque, agent_alloc: std.mem.Allocator) ?[]u8 {
+                const dc: *@This() = @ptrCast(@alignCast(ctx));
+                dc.session.injection_mu.lock();
+                defer dc.session.injection_mu.unlock();
+                const pending = dc.session.injection_pending orelse return null;
+                defer {
+                    dc.sm_allocator.free(pending);
+                    dc.session.injection_pending = null;
+                }
+                return agent_alloc.dupe(u8, pending) catch null;
+            }
+        };
+        var drain_ctx = DrainCtx{ .session = session, .sm_allocator = self.allocator };
+        const prev_drain_cb = session.agent.drain_injection_cb;
+        const prev_drain_ctx_val = session.agent.drain_injection_ctx;
+        defer {
+            session.agent.drain_injection_cb = prev_drain_cb;
+            session.agent.drain_injection_ctx = prev_drain_ctx_val;
+        }
+        session.agent.drain_injection_cb = DrainCtx.callback;
+        session.agent.drain_injection_ctx = @ptrCast(&drain_ctx);
+
         // Record agent start event with channel attribution
         const start_event = @import("observability.zig").ObserverEvent{ .agent_start = .{
             .provider = session.agent.provider.getName(),
@@ -1786,6 +1835,35 @@ pub const SessionManager = struct {
             self.active_tool = null;
         }
     };
+
+    /// Return the routing input for a session without acquiring session.mutex.
+    /// If the session does not exist yet, returns defaults (process, off, false).
+    pub fn routeInput(self: *SessionManager, session_key: []const u8) inbound_router.RouteInput {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const session = self.sessions.get(session_key) orelse return .{
+            .turn_running = false,
+            .queue_mode = .off,
+            .has_pending_injection = false,
+        };
+        return .{
+            .turn_running = session.turn_running.load(.acquire),
+            .queue_mode = session.agent.queue_mode,
+            .has_pending_injection = session.hasInjection(),
+        };
+    }
+
+    /// Deposit a mid-turn injection for a running session.
+    /// Safe to call while the session turn is in progress — does not acquire session.mutex.
+    /// Replaces any existing pending injection.  No-op when session does not exist.
+    pub fn injectMidTurn(self: *SessionManager, session_key: []const u8, text: []const u8) !void {
+        const session = blk: {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            break :blk self.sessions.get(session_key) orelse return;
+        };
+        try session.injectMidTurn(self.allocator, text);
+    }
 
     pub const SessionSnapshot = struct {
         session_key: []u8,
