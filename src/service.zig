@@ -579,7 +579,7 @@ fn installLinuxSysvinit(allocator: std.mem.Allocator) !void {
     try file.writeAll(script);
     try file.chmod(0o755);
 
-    sysvinitUpdateChecked(allocator, &.{ "nullclaw", "defaults" }) catch |err| switch (err) {
+    sysvinitUpdateChecked(allocator, &.{ "nullclaw", "defaults", "95" }) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
@@ -981,8 +981,9 @@ fn buildSysvinitScript(allocator: std.mem.Allocator, cfg: SysvinitScriptConfig) 
         \\#!/bin/sh
         \\### BEGIN INIT INFO
         \\# Provides:          nullclaw
-        \\# Required-Start:    $network $remote_fs
+        \\# Required-Start:    $network $remote_fs $syslog
         \\# Required-Stop:     $network $remote_fs
+        \\# Should-Start:      ntp ntpsec
         \\# Default-Start:     2 3 4 5
         \\# Default-Stop:      0 1 6
         \\# Description:       nullclaw gateway runtime
@@ -1002,15 +1003,10 @@ fn buildSysvinitScript(allocator: std.mem.Allocator, cfg: SysvinitScriptConfig) 
         \\case "$1" in
         \\  start)
         \\    echo "Starting nullclaw..."
-        \\    # Wait up to 60s for HTTPS to work (covers network, DNS, NTP/clock).
-        \\    i=0; while [ "$i" -lt 30 ]; do
-        \\        curl -sfo /dev/null --max-time 2 https://openrouter.ai >/dev/null 2>&1 && break
-        \\        sleep 2; i=$((i + 1))
-        \\    done
         \\    export HOME="$SERVICE_HOME"
         \\    export NULLCLAW_HOME="$NULLCLAW_HOME"
         \\{s}
-        \\    {s} --start --background --make-pidfile --pidfile "$PIDFILE"{s} --chdir "$SERVICE_HOME" --startas /bin/sh -- -c "[ -f \\"$ENVFILE\\" ] && set -a && . \\"$ENVFILE\\" && set +a; while true; do \\"$DAEMON\\" gateway >> \\"$LOGFILE\\" 2>&1; sleep $RESPAWN_DELAY; done"
+        \\    {s} --start --background --make-pidfile --pidfile "$PIDFILE"{s} --chdir "$SERVICE_HOME" --startas /bin/sh -- -c "[ -f \\"$ENVFILE\\" ] && set -a && . \\"$ENVFILE\\" && set +a; i=0; while [ \\$i -lt 90 ]; do curl -sfo /dev/null --max-time 2 https://openrouter.ai >/dev/null 2>&1 && break; sleep 2; i=\\$((i + 1)); done; while true; do \\"$DAEMON\\" gateway >> \\"$LOGFILE\\" 2>&1; sleep $RESPAWN_DELAY; done"
         \\    ;;
         \\  stop)
         \\    echo "Stopping nullclaw..."
