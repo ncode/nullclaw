@@ -274,6 +274,10 @@ pub const Server = struct {
     pub const AcceptError = IoNet.Server.AcceptError;
 
     fn acceptPosixNonblocking(self: *Server) AcceptError!Connection {
+        if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) {
+            unreachable;
+        }
+
         var address: Address = undefined;
         var address_len: posix.socklen_t = @sizeOf(Address);
 
@@ -305,11 +309,7 @@ pub const Server = struct {
         }
     }
 
-    pub fn accept(self: *Server) AcceptError!Connection {
-        if (socketIsNonblocking(self.stream.handle)) {
-            return self.acceptPosixNonblocking();
-        }
-
+    fn acceptViaIo(self: *Server) AcceptError!Connection {
         const accept_options: IoNet.Server.AcceptOptions = if (comptime IoNet.Server.AcceptOptions == void) {} else .{ .mode = .stream, .protocol = .tcp };
         var server: IoNet.Server = .{
             .socket = .{
@@ -325,6 +325,18 @@ pub const Server = struct {
             .stream = .{ .handle = stream.socket.handle },
             .address = Address.fromCurrent(stream.socket.address),
         };
+    }
+
+    pub fn accept(self: *Server) AcceptError!Connection {
+        if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) {
+            return self.acceptViaIo();
+        }
+
+        if (socketIsNonblocking(self.stream.handle)) {
+            return self.acceptPosixNonblocking();
+        }
+
+        return self.acceptViaIo();
     }
 };
 
