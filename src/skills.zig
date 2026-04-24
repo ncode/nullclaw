@@ -11,7 +11,8 @@ const skillforge = @import("skillforge.zig");
 
 // Skills — user-defined capabilities loaded from disk.
 //
-// Each skill lives in ~/.nullclaw/workspace/skills/<name>/ with:
+// Each skill lives in ~/.nullclaw/workspace/skills/<name>/ or
+// ~/.nullclaw/workspace/skills/<category>/<name>/ with:
 //   - SKILL.toml  — preferred manifest format (zeroclaw-compatible)
 //   - skill.json  — legacy manifest format (optional)
 //   - SKILL.md    — instruction text
@@ -709,7 +710,7 @@ fn checkBinaryExists(allocator: std.mem.Allocator, bin_name: []const u8) bool {
 
 // ── Listing ─────────────────────────────────────────────────────
 
-/// Scan workspace_dir/skills/ for subdirectories, loading each as a Skill.
+/// Scan workspace_dir/skills/ for skill subdirectories, including one category level.
 /// Returns owned slice; caller must free with freeSkills().
 pub fn listSkills(allocator: std.mem.Allocator, workspace_dir: []const u8, observer: ?observability.Observer) ![]Skill {
     const skills_dir_path = try std.fmt.allocPrint(allocator, "{s}/skills", .{workspace_dir});

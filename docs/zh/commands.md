@@ -29,6 +29,7 @@
 | `nullclaw onboard --api-key ... --provider ... --model ... --memory ...` | 一次性指定 provider、model、memory backend |
 | `nullclaw onboard --channels-only` | 只重配 channel / allowlist |
 | `nullclaw agent -m "..."` | 单条消息模式 |
+| `nullclaw agent --skill news-digest -m "..."` | 在指定 skill 激活的状态下执行单条消息 |
 | `nullclaw agent` | 交互会话模式 |
 
 ### 交互式模型路由
@@ -42,6 +43,7 @@
 - `/model auto` 会清除这个用户 pin，把会话恢复到配置里的默认模型，并让后续回合重新使用 `model_routes`。
 - 如果没有配置 `model_routes`，`/model auto` 仍然会清除 pin，并把会话切回配置里的默认模型。
 - 通过 `--model` 或 `--provider` 启动 `nullclaw agent` 时，也会把该次运行 pin 到显式模型，从而绕过 `model_routes`。
+- 通过 `--skill <name>` 启动 `nullclaw agent` 时，会在第一条消息或 REPL 轮次前激活该 skill。
 
 ## 运行与运维
 
