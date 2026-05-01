@@ -29,6 +29,8 @@
 | `nullclaw onboard --api-key ... --provider ... --model ... --memory ...` | 一次性指定 provider、model、memory backend |
 | `nullclaw onboard --channels-only` | 只重配 channel / allowlist |
 | `nullclaw agent -m "..."` | 单条消息模式 |
+| `nullclaw agent --workspace /path/to/workspace -m "..."` | 本次进程使用指定 workspace 运行 agent |
+| `nullclaw agent --skill news-digest -m "..."` | 在指定 skill 激活的状态下执行单条消息 |
 | `nullclaw agent` | 交互会话模式 |
 
 ### 交互式模型路由
@@ -42,6 +44,7 @@
 - `/model auto` 会清除这个用户 pin，把会话恢复到配置里的默认模型，并让后续回合重新使用 `model_routes`。
 - 如果没有配置 `model_routes`，`/model auto` 仍然会清除 pin，并把会话切回配置里的默认模型。
 - 通过 `--model` 或 `--provider` 启动 `nullclaw agent` 时，也会把该次运行 pin 到显式模型，从而绕过 `model_routes`。
+- 通过 `--skill <name>` 启动 `nullclaw agent` 时，会在第一条消息或 REPL 轮次前激活该 skill。
 
 ## 运行与运维
 
@@ -50,6 +53,7 @@
 | `nullclaw gateway` | 启动长期运行 runtime，默认读取配置中的 host/port |
 | `nullclaw gateway --port 8080` | 用 CLI 覆盖网关端口 |
 | `nullclaw gateway --host 0.0.0.0 --port 8080` | 用 CLI 覆盖监听地址与端口 |
+| `nullclaw gateway --workspace /path/to/workspace` | 本次 gateway 进程使用指定 workspace |
 | `nullclaw service install` | 安装后台服务 |
 | `nullclaw service start` | 启动后台服务 |
 | `nullclaw service stop` | 停止后台服务 |
@@ -69,6 +73,7 @@
 
 - `auth` 目前只支持 `openai-codex`。
 - `gateway` 只是覆盖 host/port，其他安全策略仍以配置文件为准。
+- `agent --workspace` 和 `gateway --workspace` 只覆盖当前进程解析到的 workspace，效果等同于设置 `NULLCLAW_WORKSPACE`。
 
 ## 渠道、任务与扩展
 
@@ -105,7 +110,7 @@
 | 命令 | 说明 |
 |---|---|
 | `nullclaw skills list` | 列出已安装 skill |
-| `nullclaw skills install <source>` | 从 GitHub URL 或本地路径安装 skill |
+| `nullclaw skills install <source>` | 从 Git URL、本地路径或 HTTPS well-known skill 端点安装 skill |
 | `nullclaw skills install --name <query>` | 在 skill registry 中搜索并安装最匹配的 skill |
 | `nullclaw skills remove <name>` | 移除 skill |
 | `nullclaw skills info <name>` | 查看 skill 元信息 |

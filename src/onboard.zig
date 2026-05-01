@@ -68,6 +68,7 @@ const WORKSPACE_HEARTBEAT_TEMPLATE = @embedFile("workspace_templates/HEARTBEAT.m
 const WORKSPACE_BOOTSTRAP_TEMPLATE = @embedFile("workspace_templates/BOOTSTRAP.md");
 const MODELS_REFRESH_TIMEOUT_SECS = "10";
 const MODELS_REFRESH_MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const KEY_WRITE_FAILED_DOCKER_FIX = "docker compose run --rm --user root --entrypoint chown agent -R 65534:65534 /nullclaw-data";
 // ── Project context ──────────────────────────────────────────────
 
 pub const ProjectContext = struct {
@@ -957,7 +958,7 @@ pub fn runQuickSetup(allocator: std.mem.Allocator, api_key: ?[]const u8, provide
     try scaffoldWorkspaceForConfig(allocator, &cfg, &ProjectContext{});
 
     // Save config so subsequent commands can find it
-    try cfg.save();
+    try saveConfigWithOnboardErrorMessage(&cfg, stdout);
 
     // Print summary
     try stdout.print("  [OK] Workspace:  {s}\n", .{cfg.workspace_dir});
@@ -988,6 +989,29 @@ fn ensureSecretsEncryptionEnabled(cfg: *const Config) Config.ValidationError!voi
     }
 }
 
+fn printKeyWriteFailedSaveError(out: *std.Io.Writer, config_path: []const u8) !void {
+    const config_dir = std_compat.fs.path.dirname(config_path) orelse config_path;
+    try out.print(
+        "\n  Error: could not write encryption key in {s}.\n" ++
+            "  This usually means the config directory is not writable by the current user.\n" ++
+            "  In Docker Compose, repair the volume ownership with:\n" ++
+            "    {s}\n" ++
+            "  Then retry onboard.\n",
+        .{ config_dir, KEY_WRITE_FAILED_DOCKER_FIX },
+    );
+}
+
+fn saveConfigWithOnboardErrorMessage(cfg: *const Config, out: *std.Io.Writer) !void {
+    cfg.save() catch |err| switch (err) {
+        error.KeyWriteFailed => {
+            try printKeyWriteFailedSaveError(out, cfg.config_path);
+            try out.flush();
+            return err;
+        },
+        else => return err,
+    };
+}
+
 /// Reconfigure channels and allowlists only (preserves existing config).
 pub fn runChannelsOnly(allocator: std.mem.Allocator) !void {
     var stdout_buf: [4096]u8 = undefined;
@@ -1007,7 +1031,7 @@ pub fn runChannelsOnly(allocator: std.mem.Allocator) !void {
     try stdout.writeAll("Channel setup wizard:\n");
     const changed = try configureChannelsInteractive(allocator, &cfg, stdout, &input_buf, "");
     if (changed) {
-        try cfg.save();
+        try saveConfigWithOnboardErrorMessage(&cfg, stdout);
         try stdout.writeAll("Channel configuration saved.\n\n");
     } else {
         try stdout.writeAll("No channel changes applied.\n\n");
@@ -1636,6 +1660,10 @@ fn configureMatrixChannel(cfg: *Config, out: *std.Io.Writer, _: []u8, prefix: []
     try out.print("{s}  Matrix user ID (optional, for typing indicators): ", .{prefix});
     const user_id = prompt(out, &user_id_buf, "", "") orelse return false;
 
+    var pantalaimon_buf: [512]u8 = undefined;
+    try out.print("{s}  Pantalaimon proxy URL for E2EE (optional, e.g. http://localhost:8008): ", .{prefix});
+    const pantalaimon = prompt(out, &pantalaimon_buf, "", "") orelse return false;
+
     const accounts = try cfg.allocator.alloc(config_mod.MatrixConfig, 1);
     accounts[0] = .{
         .account_id = "default",
@@ -1643,10 +1671,12 @@ fn configureMatrixChannel(cfg: *Config, out: *std.Io.Writer, _: []u8, prefix: []
         .access_token = try cfg.allocator.dupe(u8, access_token),
         .room_id = try cfg.allocator.dupe(u8, room_id),
         .user_id = if (user_id.len > 0) try cfg.allocator.dupe(u8, user_id) else null,
+        .pantalaimon_proxy_url = if (pantalaimon.len > 0) try cfg.allocator.dupe(u8, pantalaimon) else null,
         .allow_from = &[_][]const u8{"*"},
     };
     cfg.channels.matrix = accounts;
-    try out.print("{s}  -> Matrix configured (allow_from=*)\n", .{prefix});
+    const e2ee_note: []const u8 = if (pantalaimon.len > 0) " + E2EE via pantalaimon" else "";
+    try out.print("{s}  -> Matrix configured (allow_from=*{s})\n", .{ prefix, e2ee_note });
     return true;
 }
 
@@ -2423,21 +2453,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try scaffoldWorkspaceForConfig(allocator, &cfg, &ProjectContext{});
 
     // Save config
-    cfg.save() catch |err| {
-        if (err == error.KeyWriteFailed) {
-            try out.print(
-                "\n  Error: could not write encryption key to {s}.\n" ++
-                    "  This usually means the config directory is not writable by the current user.\n" ++
-                    "  In Docker: run `docker compose run --rm --user root agent chown -R 65534:65534 /nullclaw-data`\n" ++
-                    "  then retry onboard. Alternatively, set `\"secrets\": {{\"encrypt\": false}}` in config.json\n" ++
-                    "  to disable at-rest encryption (not recommended for production).\n",
-                .{std_compat.fs.path.dirname(cfg.config_path) orelse cfg.config_path},
-            );
-            try out.flush();
-            return;
-        }
-        return err;
-    };
+    try saveConfigWithOnboardErrorMessage(&cfg, out);
 
     // Print summary
     try out.writeAll("  ── Configuration complete ──\n\n");
@@ -3999,6 +4015,21 @@ test "bootstrap lifecycle stays equivalent across markdown hybrid and sqlite bac
 }
 
 // ── Additional onboard tests ────────────────────────────────────
+
+test "onboard key write failure message gives safe docker ownership fix" {
+    // Regression: #763 — KeyWriteFailed during onboard must print the failing
+    // config directory and an executable Docker Compose ownership fix.
+    var buf: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try printKeyWriteFailedSaveError(&writer, "/nullclaw-data/config.json");
+    const message = writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, message, "could not write encryption key in /nullclaw-data") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "--entrypoint chown agent -R 65534:65534 /nullclaw-data") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Then retry onboard.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "encrypt\": false") == null);
+}
 
 test "canonicalProviderName passthrough for known providers" {
     try std.testing.expectEqualStrings("anthropic", canonicalProviderName("anthropic"));
