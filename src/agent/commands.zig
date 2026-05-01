@@ -1942,6 +1942,20 @@ fn setActiveSkillSession(self: anytype, skill: *const skills_mod.Skill, interact
     self.active_skill_interactive = interactive;
 }
 
+/// Activate a skill session by name. Returns true when found and activated,
+/// false when no skill with that name exists.
+pub fn activateSkillByName(self: anytype, name: []const u8) !bool {
+    const skills = try skills_mod.listSkills(self.allocator, self.workspace_dir, self.observer);
+    defer skills_mod.freeSkills(self.allocator, skills);
+    switch (findSkillByNameNormalized(skills, name)) {
+        .unique => |skill| {
+            try setActiveSkillSession(self, skill, false);
+            return true;
+        },
+        else => return false,
+    }
+}
+
 fn activeSkillModeLabel(interactive: bool) []const u8 {
     return if (interactive) "interactive" else "non-interactive";
 }
@@ -5553,4 +5567,93 @@ fn handleMemoryCommand(self: anytype, arg: []const u8) ![]const u8 {
     }
 
     return try self.allocator.dupe(u8, usage);
+}
+
+test "activateSkillByName activates matching skill" {
+    const allocator = std.testing.allocator;
+    const fs_compat = @import("compat").fs;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try fs_compat.Dir.wrap(tmp.dir).makePath("skills/news-digest");
+    {
+        const f = try fs_compat.Dir.wrap(tmp.dir).createFile("skills/news-digest/skill.json", .{});
+        defer f.close();
+        try f.writeAll(
+            \\{
+            \\  "name": "news-digest",
+            \\  "description": "Build a digest",
+            \\  "version": "1.0.0",
+            \\  "author": "test"
+            \\}
+        );
+    }
+    {
+        const f = try fs_compat.Dir.wrap(tmp.dir).createFile("skills/news-digest/SKILL.md", .{});
+        defer f.close();
+        try f.writeAll("Collect news.");
+    }
+
+    const workspace = try fs_compat.Dir.wrap(tmp.dir).realpathAlloc(allocator, ".");
+    defer allocator.free(workspace);
+
+    var harness = struct {
+        allocator: std.mem.Allocator,
+        workspace_dir: []const u8,
+        observer: ?@import("../observability.zig").Observer = null,
+        active_skill_name: ?[]const u8 = null,
+        active_skill_name_owned: bool = false,
+        active_skill_description: ?[]const u8 = null,
+        active_skill_description_owned: bool = false,
+        active_skill_instructions: ?[]const u8 = null,
+        active_skill_instructions_owned: bool = false,
+        active_skill_path: ?[]const u8 = null,
+        active_skill_path_owned: bool = false,
+        active_skill_interactive: bool = false,
+    }{
+        .allocator = allocator,
+        .workspace_dir = workspace,
+    };
+    defer {
+        if (harness.active_skill_name_owned) if (harness.active_skill_name) |v| allocator.free(v);
+        if (harness.active_skill_description_owned) if (harness.active_skill_description) |v| allocator.free(v);
+        if (harness.active_skill_instructions_owned) if (harness.active_skill_instructions) |v| allocator.free(v);
+        if (harness.active_skill_path_owned) if (harness.active_skill_path) |v| allocator.free(v);
+    }
+
+    const found = try activateSkillByName(&harness, "news-digest");
+    try std.testing.expect(found);
+    try std.testing.expectEqualStrings("news-digest", harness.active_skill_name.?);
+}
+
+test "activateSkillByName returns false when skill not found" {
+    const allocator = std.testing.allocator;
+    const fs_compat = @import("compat").fs;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const workspace = try fs_compat.Dir.wrap(tmp.dir).realpathAlloc(allocator, ".");
+    defer allocator.free(workspace);
+
+    var harness = struct {
+        allocator: std.mem.Allocator,
+        workspace_dir: []const u8,
+        observer: ?@import("../observability.zig").Observer = null,
+        active_skill_name: ?[]const u8 = null,
+        active_skill_name_owned: bool = false,
+        active_skill_description: ?[]const u8 = null,
+        active_skill_description_owned: bool = false,
+        active_skill_instructions: ?[]const u8 = null,
+        active_skill_instructions_owned: bool = false,
+        active_skill_path: ?[]const u8 = null,
+        active_skill_path_owned: bool = false,
+        active_skill_interactive: bool = false,
+    }{
+        .allocator = allocator,
+        .workspace_dir = workspace,
+    };
+
+    const found = try activateSkillByName(&harness, "ghost-skill");
+    try std.testing.expect(!found);
+    try std.testing.expect(harness.active_skill_name == null);
 }

@@ -171,6 +171,10 @@ fn trimTrailingSlash(value: []const u8) []const u8 {
     return out;
 }
 
+fn matrixApiBase(cfg: std.json.ObjectMap, homeserver: []const u8) []const u8 {
+    return trimTrailingSlash(optionalString(cfg, "pantalaimon_proxy_url") orelse homeserver);
+}
+
 fn timeoutString(buf: []u8, timeout_secs: u64) []const u8 {
     return std.fmt.bufPrint(buf, "{d}", .{timeout_secs}) catch "10";
 }
@@ -397,7 +401,7 @@ fn probeMatrix(
     _ = nonEmptyString(cfg, "room_id") orelse return fail(channel, account, "missing_room_id");
     const access_token = nonEmptyString(cfg, "access_token") orelse return fail(channel, account, "missing_access_token");
 
-    const base = trimTrailingSlash(homeserver);
+    const base = matrixApiBase(cfg, homeserver);
     const url = std.fmt.allocPrint(allocator, "{s}/_matrix/client/v3/account/whoami", .{base}) catch {
         return fail(channel, account, "probe_setup_failed");
     };
@@ -1171,6 +1175,26 @@ test "allocOneBotApiBase normalizes websocket schemes" {
     const wss_base = try allocOneBotApiBase(allocator, "wss://onebot.example/ws");
     defer allocator.free(wss_base);
     try std.testing.expectEqualStrings("https://onebot.example/ws", wss_base);
+}
+
+test "matrixApiBase uses pantalaimon proxy when configured" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\{
+        \\  "homeserver": "https://matrix.example/",
+        \\  "pantalaimon_proxy_url": "http://127.0.0.1:8008/"
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+
+    // Regression: Matrix channel health probes must route through Pantalaimon
+    // instead of bypassing E2EE via the homeserver URL.
+    try std.testing.expectEqualStrings(
+        "http://127.0.0.1:8008",
+        matrixApiBase(parsed.value.object, "https://matrix.example/"),
+    );
 }
 
 test "oneBotResponseLooksHealthy validates retcode and status" {
