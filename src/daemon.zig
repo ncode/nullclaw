@@ -25,7 +25,6 @@ const channel_catalog = @import("channel_catalog.zig");
 const channel_adapters = @import("channel_adapters.zig");
 const heartbeat_mod = @import("heartbeat.zig");
 const inbound_debounce = @import("inbound_debounce.zig");
-const inbound_router = @import("inbound_router.zig");
 const interaction_choices = @import("interactions/choices.zig");
 const memory_mod = @import("memory/root.zig");
 const outbound = @import("outbound.zig");
@@ -226,6 +225,9 @@ fn logGatewayFailure(err: anyerror, port: u16) void {
         error.AddressInUse => {
             log.err("Gateway failed to start: port {d} is already in use. Is another nullclaw instance running?", .{port});
         },
+        error.PublicBindRequiresTunnel => {
+            log.err("Gateway failed to start: public bind requires an active tunnel or gateway.allow_public_bind=true.", .{});
+        },
         else => {
             log.err("Gateway failed to start: {}", .{err});
         },
@@ -236,7 +238,7 @@ fn logGatewayFailure(err: anyerror, port: u16) void {
 /// Gateway thread entry point.
 fn gatewayThread(allocator: std.mem.Allocator, config: *const Config, host: []const u8, port: u16, state: *DaemonState, event_bus: *bus_mod.Bus) void {
     const gateway = @import("gateway.zig");
-    gateway.run(allocator, host, port, config, event_bus) catch |err| {
+    gateway.run(allocator, host, port, config, event_bus, state.tunnel_url) catch |err| {
         logGatewayFailure(err, port);
         recordGatewayFailure(err, state);
         return;
@@ -1212,18 +1214,12 @@ fn inboundDispatcherThread(
             defer if (routed_session_key) |key| allocator.free(key);
             const session_key = routed_session_key orelse msg.session_key;
 
-            switch (inbound_router.route(runtime.session_mgr.routeInput(session_key))) {
-                .inject, .replace_injection => {
-                    runtime.session_mgr.injectMidTurn(session_key, msg.content) catch |err|
-                        log.warn("mid-turn inject failed session={s} err={}", .{ session_key, err });
-                    continue;
-                },
-                .drop => {
-                    log.info("dropping inbound: session busy queue_mode=off session={s}", .{session_key});
-                    continue;
-                },
-                .process, .queue => {},
+            const outbound_channel = resolveOutboundChannel(registry, msg.channel, outbound_account_id);
+            if (outbound_channel) |channel| {
+                markInboundMessageRead(channel, buildInboundMessageRef(&msg, parsed_meta.fields));
             }
+
+            if (runtime.session_mgr.routeInbound(session_key, msg.content) == .skip) continue;
 
             const typing_recipient = sendInboundProcessingIndicator(
                 allocator,
@@ -1241,10 +1237,6 @@ fn inboundDispatcherThread(
                 typing_recipient,
             );
 
-            const outbound_channel = resolveOutboundChannel(registry, msg.channel, outbound_account_id);
-            if (outbound_channel) |channel| {
-                markInboundMessageRead(channel, buildInboundMessageRef(&msg, parsed_meta.fields));
-            }
             const use_tracked_draft_outbound = if (outbound_channel) |channel|
                 !channel.supportsStreamingOutbound() and dispatch.supportsDraftStreaming(channel)
             else
