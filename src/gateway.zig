@@ -46,6 +46,7 @@ const channel_adapters = @import("channel_adapters.zig");
 const cron_mod = @import("cron.zig");
 const ConversationContext = @import("agent/prompt.zig").ConversationContext;
 const buildConversationContext = @import("agent/prompt.zig").buildConversationContext;
+const log = std.log.scoped(.gateway);
 
 /// Maximum request body size (64KB) — prevents memory exhaustion.
 pub const MAX_BODY_SIZE: usize = 65_536;
@@ -54,6 +55,8 @@ const MAX_HEADER_SIZE: usize = 8_192;
 /// Request timeout (30s) — prevents slow-loris attacks.
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 const ACCEPT_POLL_INTERVAL_MS: u64 = 100;
+const ACCEPT_ERROR_BACKOFF_MAX_MS: u64 = 1_000;
+const ACCEPT_ERROR_LOG_INTERVAL: u32 = 20;
 
 /// Sliding window for rate limiting (60s).
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
@@ -5114,6 +5117,12 @@ pub fn clearSharedScheduler() void {
     g_shared_scheduler = null;
 }
 
+fn nextAcceptSleepMs(previous_sleep_ms: u64, err: anyerror) u64 {
+    if (err == error.WouldBlock) return ACCEPT_POLL_INTERVAL_MS;
+    const base = if (previous_sleep_ms < ACCEPT_POLL_INTERVAL_MS) ACCEPT_POLL_INTERVAL_MS else previous_sleep_ms;
+    return @min(base * 2, ACCEPT_ERROR_BACKOFF_MAX_MS);
+}
+
 /// Run the HTTP gateway. Binds to host:port and serves HTTP requests.
 /// Endpoints: GET /health, GET /ready, GET /status, GET /doctor, POST /pair, POST /logout, POST /webhook, GET|POST /whatsapp, POST /telegram, POST /slack/events, POST /line, POST /lark, GET|POST /wechat, GET|POST /wecom, POST /qq, POST /max
 /// If config_ptr is null, loads config internally (for backward compatibility).
@@ -5380,17 +5389,32 @@ pub fn run(
         }
     }
 
+    var accept_sleep_ms: u64 = ACCEPT_POLL_INTERVAL_MS;
+    var accept_error_count: u32 = 0;
+
     // Accept loop — read raw HTTP from TCP connections
     while (true) {
         if (daemon_mode and daemon.isShutdownRequested()) break;
 
         var conn = server.accept() catch |err| switch (err) {
             error.WouldBlock => {
-                std_compat.thread.sleep(ACCEPT_POLL_INTERVAL_MS * std.time.ns_per_ms);
+                accept_sleep_ms = nextAcceptSleepMs(accept_sleep_ms, err);
+                std_compat.thread.sleep(accept_sleep_ms * std.time.ns_per_ms);
                 continue;
             },
-            else => continue,
+            else => {
+                accept_error_count +|= 1;
+                const next_sleep_ms = nextAcceptSleepMs(accept_sleep_ms, err);
+                if (accept_error_count == 1 or (accept_error_count % ACCEPT_ERROR_LOG_INTERVAL) == 0) {
+                    log.warn("gateway accept failed ({s}); backing off for {d}ms", .{ @errorName(err), next_sleep_ms });
+                }
+                accept_sleep_ms = next_sleep_ms;
+                std_compat.thread.sleep(accept_sleep_ms * std.time.ns_per_ms);
+                continue;
+            },
         };
+        accept_sleep_ms = ACCEPT_POLL_INTERVAL_MS;
+        accept_error_count = 0;
         var close_conn = true;
         defer if (close_conn) conn.stream.close();
         configureRequestReadTimeout(&conn.stream, request_timeout_secs);
@@ -8728,6 +8752,18 @@ test "readHttpRequestFromReader maps Timeout to RequestTimeout" {
 
     var reader = TimeoutReader{};
     try std.testing.expectError(error.RequestTimeout, readHttpRequestFromReader(std.testing.allocator, &reader, MAX_BODY_SIZE));
+}
+
+test "nextAcceptSleepMs resets to poll interval on WouldBlock" {
+    try std.testing.expectEqual(ACCEPT_POLL_INTERVAL_MS, nextAcceptSleepMs(800, error.WouldBlock));
+}
+
+test "nextAcceptSleepMs exponentially backs off and caps for non-WouldBlock errors" {
+    const unexpected = error.Unexpected;
+    try std.testing.expectEqual(@as(u64, 200), nextAcceptSleepMs(100, unexpected));
+    try std.testing.expectEqual(@as(u64, 800), nextAcceptSleepMs(400, unexpected));
+    try std.testing.expectEqual(ACCEPT_ERROR_BACKOFF_MAX_MS, nextAcceptSleepMs(900, unexpected));
+    try std.testing.expectEqual(ACCEPT_ERROR_BACKOFF_MAX_MS, nextAcceptSleepMs(ACCEPT_ERROR_BACKOFF_MAX_MS, unexpected));
 }
 
 test "maybeProbeA2aVision skips probe when a2a is disabled" {
