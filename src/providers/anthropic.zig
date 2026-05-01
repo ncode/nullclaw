@@ -1,5 +1,4 @@
 const std = @import("std");
-const std_compat = @import("compat");
 const log = std.log.scoped(.anthropic);
 const root = @import("root.zig");
 const sse = @import("sse.zig");
@@ -288,9 +287,9 @@ pub const AnthropicProvider = struct {
 
         // OAuth tokens require extra beta and user-agent headers
         const resp_body = if (is_oauth)
-            curlPostOAuth(allocator, url, body, auth_hdr, version_hdr) catch return error.AnthropicApiError
+            postOAuth(allocator, url, body, auth_hdr, version_hdr) catch return error.AnthropicApiError
         else
-            root.curlPostTimed(allocator, url, body, &.{ auth_hdr, version_hdr }, 0) catch return error.AnthropicApiError;
+            root.httpPostTimed(allocator, url, body, &.{ auth_hdr, version_hdr }, 0) catch return error.AnthropicApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body);
@@ -328,9 +327,9 @@ pub const AnthropicProvider = struct {
         const version_hdr = std.fmt.bufPrint(&version_hdr_buf, "anthropic-version: {s}", .{API_VERSION}) catch return error.AnthropicApiError;
 
         const resp_body = if (is_oauth)
-            curlPostOAuth(allocator, url, body, auth_hdr, version_hdr) catch return error.AnthropicApiError
+            postOAuth(allocator, url, body, auth_hdr, version_hdr) catch return error.AnthropicApiError
         else
-            root.curlPostTimed(allocator, url, body, &.{ auth_hdr, version_hdr }, request.timeout_secs) catch return error.AnthropicApiError;
+            root.httpPostTimed(allocator, url, body, &.{ auth_hdr, version_hdr }, request.timeout_secs) catch return error.AnthropicApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body);
@@ -395,8 +394,8 @@ pub const AnthropicProvider = struct {
             hdr_count += 1;
         }
 
-        return sse.curlStreamAnthropic(allocator, url, body, headers_buf[0..hdr_count], callback, callback_ctx) catch |err| {
-            if (err == error.CurlWaitError or err == error.CurlFailed) {
+        return sse.httpStreamAnthropic(allocator, url, body, headers_buf[0..hdr_count], callback, callback_ctx) catch |err| {
+            if (err == error.HttpWaitError or err == error.HttpFailed) {
                 log.warn("Anthropic streaming failed with {}; falling back to non-streaming response", .{err});
                 var fallback = try chatImpl(ptr, allocator, request, model, temperature);
                 return root.emitChatResponseAsStream(allocator, &fallback, callback, callback_ctx);
@@ -602,66 +601,35 @@ fn appendAnthropicThinkingConfig(
 }
 
 /// HTTP POST with OAuth-specific headers (anthropic-beta, user-agent).
-fn curlPostOAuth(allocator: std.mem.Allocator, url: []const u8, body: []const u8, auth_hdr: []const u8, version_hdr: []const u8) ![]u8 {
-    var argv = std.ArrayListUnmanaged([]const u8).empty;
-    defer argv.deinit(allocator);
-    try argv.appendSlice(allocator, &.{ "curl", "-s", "-X", "POST" });
-
+fn postOAuth(allocator: std.mem.Allocator, url: []const u8, body: []const u8, auth_hdr: []const u8, version_hdr: []const u8) ![]u8 {
     const proxy = http_util.getProxyFromEnv(allocator) catch null;
     defer if (proxy) |p| allocator.free(p);
-    if (proxy) |p| {
-        try argv.appendSlice(allocator, &.{ "--proxy", p });
-    }
 
     const resolve_entry = try http_util.buildSafeResolveEntryForRemoteUrl(allocator, url);
     defer if (resolve_entry) |entry| allocator.free(entry);
-    if (resolve_entry) |entry| {
-        try argv.appendSlice(allocator, &.{ "--resolve", entry });
-    }
 
-    try argv.appendSlice(allocator, &.{
-        "-H", "Content-Type: application/json",   "-H",            auth_hdr,
-        "-H", version_hdr,                        "-H",            "anthropic-beta: oauth-2025-04-20",
-        "-A", "claude-cli/2.1.2 (external, cli)", "--data-binary", "@-",
-        url,
+    var headers: std.ArrayListUnmanaged(std.http.Header) = .empty;
+    defer headers.deinit(allocator);
+    try http_util.appendHeaderLines(&headers, allocator, &.{
+        "Content-Type: application/json",
+        auth_hdr,
+        version_hdr,
+        "anthropic-beta: oauth-2025-04-20",
+        "User-Agent: claude-cli/2.1.2 (external, cli)",
     });
 
-    var child = std_compat.process.Child.init(argv.items, allocator);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-
-    if (child.stdin) |stdin_file| {
-        stdin_file.writeAll(body) catch {
-            stdin_file.close();
-            child.stdin = null;
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            return error.CurlWriteError;
-        };
-        stdin_file.close();
-        child.stdin = null;
-    } else {
-        _ = child.kill() catch {};
-        _ = child.wait() catch {};
-        return error.CurlWriteError;
-    }
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch {
-        _ = child.kill() catch {};
-        _ = child.wait() catch {};
-        return error.CurlReadError;
-    };
-
-    const term = child.wait() catch return error.CurlWaitError;
-    switch (term) {
-        .exited => |code| if (code != 0) return error.CurlFailed,
-        else => return error.CurlFailed,
-    }
-
-    return stdout;
+    const response = try http_util.nativeHttpRequest(allocator, .{
+        .method = .POST,
+        .url = url,
+        .payload = body,
+        .headers = headers.items,
+        .proxy = proxy,
+        .resolve_entry = resolve_entry,
+        .max_response_bytes = 1024 * 1024,
+        .fail_on_http_error = false,
+    });
+    defer if (response.headers.len > 0) allocator.free(response.headers);
+    return response.body;
 }
 
 pub const AuthHeader = struct {
@@ -733,6 +701,53 @@ test "auth header for setup token" {
     try std.testing.expectEqualStrings("authorization", auth.header_name);
     try std.testing.expectEqualStrings("Bearer sk-ant-oat01-mytoken", auth.header_value);
     try std.testing.expect(auth.needs_free);
+}
+
+test "anthropic oauth post native migration sends beta and user agent headers" {
+    const allocator = std.testing.allocator;
+    const handler = struct {
+        fn handle(alloc: std.mem.Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.POST, request.method);
+            try std.testing.expectEqualStrings("https://127.0.0.1/v1/messages", request.url);
+            try std.testing.expectEqualStrings("{\"messages\":[]}", request.payload.?);
+
+            var saw_auth = false;
+            var saw_beta = false;
+            var saw_user_agent = false;
+            for (request.headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                    saw_auth = true;
+                    try std.testing.expectEqualStrings("Bearer setup-token", header.value);
+                }
+                if (std.ascii.eqlIgnoreCase(header.name, "anthropic-beta")) {
+                    saw_beta = true;
+                    try std.testing.expectEqualStrings("oauth-2025-04-20", header.value);
+                }
+                if (std.ascii.eqlIgnoreCase(header.name, "User-Agent")) {
+                    saw_user_agent = true;
+                    try std.testing.expectEqualStrings("claude-cli/2.1.2 (external, cli)", header.value);
+                }
+            }
+            try std.testing.expect(saw_auth);
+            try std.testing.expect(saw_beta);
+            try std.testing.expect(saw_user_agent);
+
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "{\"content\":[]}") };
+        }
+    }.handle;
+
+    http_util.setTestNativeHttpHandler(handler);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    const body = try postOAuth(
+        allocator,
+        "https://127.0.0.1/v1/messages",
+        "{\"messages\":[]}",
+        "Authorization: Bearer setup-token",
+        "anthropic-version: 2023-06-01",
+    );
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("{\"content\":[]}", body);
 }
 
 test "buildSimpleRequestBody without system prompt" {

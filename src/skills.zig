@@ -1361,8 +1361,8 @@ fn installSkillsFromWellKnownIndex(
     const index_url = try buildWebSkillIndexUrl(allocator, source);
     defer allocator.free(index_url);
 
-    const index_resp = http_util.curlGetWithStatusAndTimeout(allocator, index_url, &.{}, "20") catch |err| switch (err) {
-        error.CurlDnsError, error.CurlConnectError, error.CurlTimeout, error.CurlTlsError, error.CurlFailed, error.CurlReadError, error.CurlWaitError => return err,
+    const index_resp = http_util.httpGetWithStatusAndTimeout(allocator, index_url, &.{}, "20") catch |err| switch (err) {
+        error.HttpDnsError, error.HttpConnectError, error.HttpTimeout, error.HttpTlsError, error.HttpFailed, error.HttpReadError, error.HttpWaitError => return err,
         else => return err,
     };
     defer allocator.free(index_resp.body);
@@ -1426,8 +1426,8 @@ fn installSkillsFromWellKnownIndex(
             return error.NotSupported;
         }
 
-        const artifact_bytes = http_util.curlGetMaxBytes(allocator, resolved_url, &.{}, "20", WEB_SKILL_ARTIFACT_MAX_BYTES) catch |err| switch (err) {
-            error.CurlDnsError, error.CurlConnectError, error.CurlTimeout, error.CurlTlsError, error.CurlFailed, error.CurlReadError, error.CurlWaitError => {
+        const artifact_bytes = http_util.httpGetMaxBytes(allocator, resolved_url, &.{}, "20", WEB_SKILL_ARTIFACT_MAX_BYTES) catch |err| switch (err) {
+            error.HttpDnsError, error.HttpConnectError, error.HttpTimeout, error.HttpTlsError, error.HttpFailed, error.HttpReadError, error.HttpWaitError => {
                 const msg = try std.fmt.allocPrint(allocator, "failed to fetch web skill artifact for '{s}'", .{entry.name});
                 defer allocator.free(msg);
                 setInstallErrorDetail(allocator, detail_out, msg);
@@ -2468,7 +2468,7 @@ fn installSkillFromWellKnownUrl(
     defer if (installed_name) |name| allocator.free(name);
 
     const timeout = "20";
-    const manifest_resp = http_util.curlGetWithStatusAndTimeout(allocator, manifest_url, &.{}, timeout) catch null;
+    const manifest_resp = http_util.httpGetWithStatusAndTimeout(allocator, manifest_url, &.{}, timeout) catch null;
     if (manifest_resp) |resp| {
         defer allocator.free(resp.body);
         if (resp.status_code >= 200 and resp.status_code < 300) {
@@ -2493,8 +2493,8 @@ fn installSkillFromWellKnownUrl(
     }
 
     for (urls) |candidate_url| {
-        const resp = http_util.curlGetWithStatusAndTimeout(allocator, candidate_url, &.{}, timeout) catch |err| switch (err) {
-            error.CurlDnsError, error.CurlConnectError, error.CurlTimeout, error.CurlTlsError, error.CurlFailed, error.CurlReadError, error.CurlWaitError => {
+        const resp = http_util.httpGetWithStatusAndTimeout(allocator, candidate_url, &.{}, timeout) catch |err| switch (err) {
+            error.HttpDnsError, error.HttpConnectError, error.HttpTimeout, error.HttpTlsError, error.HttpFailed, error.HttpReadError, error.HttpWaitError => {
                 setInstallErrorDetail(allocator, detail_out, "failed to fetch skill from web source");
                 return err;
             },

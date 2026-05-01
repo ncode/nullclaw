@@ -229,12 +229,8 @@ pub const MarkdownMemory = struct {
             all.deinit(allocator);
         }
 
-        var seen_root_paths: std.StringHashMapUnmanaged(void) = .empty;
-        defer {
-            var key_it = seen_root_paths.keyIterator();
-            while (key_it.next()) |key| allocator.free(key.*);
-            seen_root_paths.deinit(allocator);
-        }
+        var seen_root_inodes: std.AutoHashMapUnmanaged(std.Io.File.INode, void) = .empty;
+        defer seen_root_inodes.deinit(allocator);
 
         const root_candidates = [_]struct {
             filename: []const u8,
@@ -252,17 +248,10 @@ pub const MarkdownMemory = struct {
             const file = fs_compat.openPath(root_path, .{}) catch continue;
             defer file.close();
             const stat = fs_compat.stat(file) catch continue;
+            if (seen_root_inodes.contains(stat.inode)) continue;
+            try seen_root_inodes.put(allocator, stat.inode, {});
             const content = file.readToEndAlloc(allocator, 1024 * 1024) catch continue;
             defer allocator.free(content);
-
-            const canonical = std_compat.fs.realpathAlloc(allocator, root_path) catch
-                try allocator.dupe(u8, root_path);
-            errdefer allocator.free(canonical);
-            if (seen_root_paths.contains(canonical)) {
-                allocator.free(canonical);
-                continue;
-            }
-            try seen_root_paths.put(allocator, canonical, {});
 
             // Resolve timestamp: parse from filename, else use file mtime (converted to seconds).
             const file_timestamp = blk: {

@@ -255,7 +255,7 @@ pub const OpenAiProvider = struct {
             extra_header_count += 1;
         }
 
-        return sse.curlStream(allocator, BASE_URL, body, auth_hdr, extra_headers[0..extra_header_count], request.timeout_secs, callback, callback_ctx);
+        return sse.httpStream(allocator, BASE_URL, body, auth_hdr, extra_headers[0..extra_header_count], request.timeout_secs, callback, callback_ctx);
     }
 
     fn supportsStreamingImpl(_: *anyopaque) bool {
@@ -300,7 +300,7 @@ pub const OpenAiProvider = struct {
             header_count += 1;
         }
 
-        const resp_body = root.curlPostTimed(allocator, BASE_URL, body, headers_buf[0..header_count], 0) catch return error.OpenAiApiError;
+        const resp_body = root.httpPostTimed(allocator, BASE_URL, body, headers_buf[0..header_count], 0) catch return error.OpenAiApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body);
@@ -341,7 +341,7 @@ pub const OpenAiProvider = struct {
             header_count += 1;
         }
 
-        const resp_body = root.curlPostTimed(allocator, BASE_URL, body, headers_buf[0..header_count], request.timeout_secs) catch return error.OpenAiApiError;
+        const resp_body = root.httpPostTimed(allocator, BASE_URL, body, headers_buf[0..header_count], request.timeout_secs) catch return error.OpenAiApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body);

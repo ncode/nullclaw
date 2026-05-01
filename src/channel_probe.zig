@@ -180,14 +180,14 @@ fn timeoutString(buf: []u8, timeout_secs: u64) []const u8 {
 }
 
 fn classifyProbeError(err: anyerror) []const u8 {
-    if (err == error.CurlFailed) return "auth_check_failed";
-    if (err == error.CurlReadError or
-        err == error.CurlWriteError or
-        err == error.CurlWaitError or
-        err == error.CurlDnsError or
-        err == error.CurlConnectError or
-        err == error.CurlTimeout or
-        err == error.CurlTlsError)
+    if (err == error.HttpFailed) return "auth_check_failed";
+    if (err == error.HttpReadError or
+        err == error.HttpWriteError or
+        err == error.HttpWaitError or
+        err == error.HttpDnsError or
+        err == error.HttpConnectError or
+        err == error.HttpTimeout or
+        err == error.HttpTlsError)
     {
         return "network_error";
     }
@@ -323,7 +323,7 @@ fn probeTelegram(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const resp = http_util.curlPostWithProxy(allocator, url, "{}", &.{}, proxy, timeout) catch |err| {
+    const resp = http_util.httpPostWithProxy(allocator, url, "{}", &.{}, proxy, timeout) catch |err| {
         return fail(channel, account, classifyProbeError(err));
     };
     defer allocator.free(resp);
@@ -351,7 +351,7 @@ fn probeDiscord(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const resp = http_util.curlGet(allocator, "https://discord.com/api/v10/users/@me", &.{auth_header}, timeout) catch |err| {
+    const resp = http_util.httpGet(allocator, "https://discord.com/api/v10/users/@me", &.{auth_header}, timeout) catch |err| {
         return fail(channel, account, classifyProbeError(err));
     };
     defer allocator.free(resp);
@@ -379,7 +379,7 @@ fn probeSlack(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const resp = http_util.curlGet(allocator, "https://slack.com/api/auth.test", &.{auth_header}, timeout) catch |err| {
+    const resp = http_util.httpGet(allocator, "https://slack.com/api/auth.test", &.{auth_header}, timeout) catch |err| {
         return fail(channel, account, classifyProbeError(err));
     };
     defer allocator.free(resp);
@@ -415,7 +415,7 @@ fn probeMatrix(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const resp = http_util.curlGet(allocator, url, &.{auth_header}, timeout) catch |err| {
+    const resp = http_util.httpGet(allocator, url, &.{auth_header}, timeout) catch |err| {
         return fail(channel, account, classifyProbeError(err));
     };
     defer allocator.free(resp);
@@ -450,7 +450,7 @@ fn probeMattermost(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const resp = http_util.curlGet(allocator, url, &.{auth_header}, timeout) catch |err| {
+    const resp = http_util.httpGet(allocator, url, &.{auth_header}, timeout) catch |err| {
         return fail(channel, account, classifyProbeError(err));
     };
     defer allocator.free(resp);
@@ -485,13 +485,13 @@ fn probeSignal(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const rest_probe = http_util.curlGet(allocator, url_rest, &.{}, timeout);
+    const rest_probe = http_util.httpGet(allocator, url_rest, &.{}, timeout);
     if (rest_probe) |resp| {
         allocator.free(resp);
         return ok(channel, account);
     } else |_| {}
 
-    const rpc_probe = http_util.curlGet(allocator, url_rpc, &.{}, timeout);
+    const rpc_probe = http_util.httpGet(allocator, url_rpc, &.{}, timeout);
     if (rpc_probe) |resp| {
         allocator.free(resp);
         return ok(channel, account);
@@ -518,7 +518,7 @@ fn probeLine(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const resp = http_util.curlGet(allocator, "https://api.line.me/v2/bot/info", &.{auth_header}, timeout) catch |err| {
+    const resp = http_util.httpGet(allocator, "https://api.line.me/v2/bot/info", &.{auth_header}, timeout) catch |err| {
         return fail(channel, account, classifyProbeError(err));
     };
     defer allocator.free(resp);
@@ -553,7 +553,7 @@ fn probeWhatsApp(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const resp = http_util.curlGet(allocator, url, &.{auth_header}, timeout) catch |err| {
+    const resp = http_util.httpGet(allocator, url, &.{auth_header}, timeout) catch |err| {
         return fail(channel, account, classifyProbeError(err));
     };
     defer allocator.free(resp);
@@ -593,7 +593,7 @@ fn probeLark(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const resp = http_util.curlPostWithProxy(allocator, url, body, &.{}, null, timeout) catch |err| {
+    const resp = http_util.httpPostWithProxy(allocator, url, body, &.{}, null, timeout) catch |err| {
         return fail(channel, account, classifyProbeError(err));
     };
     defer allocator.free(resp);
@@ -625,7 +625,7 @@ fn probeDingTalk(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const resp = http_util.curlPostWithProxy(
+    const resp = http_util.httpPostWithProxy(
         allocator,
         "https://api.dingtalk.com/v1.0/oauth2/accessToken",
         body,
@@ -665,7 +665,7 @@ fn probeQQ(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const token_resp = http_util.curlPostWithProxy(
+    const token_resp = http_util.httpPostWithProxy(
         allocator,
         "https://bots.qq.com/app/getAppAccessToken",
         body,
@@ -693,7 +693,7 @@ fn probeQQ(
         return fail(channel, account, "probe_setup_failed");
     };
 
-    const gateway_resp = http_util.curlGet(allocator, gateway_url, &.{auth_header}, timeout) catch |err| {
+    const gateway_resp = http_util.httpGet(allocator, gateway_url, &.{auth_header}, timeout) catch |err| {
         return fail(channel, account, classifyProbeError(err));
     };
     defer allocator.free(gateway_resp);
@@ -737,7 +737,7 @@ fn probeOneBot(
     var timeout_buf: [32]u8 = undefined;
     const timeout = timeoutString(&timeout_buf, timeout_secs);
 
-    const resp = http_util.curlPostWithProxy(
+    const resp = http_util.httpPostWithProxy(
         allocator,
         url,
         "{\"action\":\"get_login_info\",\"params\":{}}",
@@ -1093,11 +1093,15 @@ test "channelSupportsAccounts differentiates account models" {
     try std.testing.expect(!channelSupportsAccounts("cli"));
 }
 
-test "classifyProbeError maps specific curl network errors" {
-    try std.testing.expectEqualStrings("network_error", classifyProbeError(error.CurlDnsError));
-    try std.testing.expectEqualStrings("network_error", classifyProbeError(error.CurlConnectError));
-    try std.testing.expectEqualStrings("network_error", classifyProbeError(error.CurlTimeout));
-    try std.testing.expectEqualStrings("network_error", classifyProbeError(error.CurlTlsError));
+test "classifyProbeError maps native http network errors" {
+    try std.testing.expectEqualStrings("network_error", classifyProbeError(error.HttpDnsError));
+    try std.testing.expectEqualStrings("network_error", classifyProbeError(error.HttpConnectError));
+    try std.testing.expectEqualStrings("network_error", classifyProbeError(error.HttpTimeout));
+    try std.testing.expectEqualStrings("network_error", classifyProbeError(error.HttpTlsError));
+}
+
+test "classifyProbeError maps generic http failure as auth failure" {
+    try std.testing.expectEqualStrings("auth_check_failed", classifyProbeError(error.HttpFailed));
 }
 
 test "resolveChannelAccountObject handles canonical accounts wrapper" {

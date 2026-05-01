@@ -1279,7 +1279,7 @@ fn inboundDispatcherThread(
 
                 // Send user-visible error reply back to the originating channel
                 const err_msg: []const u8 = switch (err) {
-                    error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError, error.CurlDnsError, error.CurlConnectError, error.CurlTimeout, error.CurlTlsError => "Network error contacting provider. Check base_url, DNS, proxy, and TLS certificates, then try again.",
+                    error.HttpFailed, error.HttpReadError, error.HttpWaitError, error.HttpWriteError, error.HttpDnsError, error.HttpConnectError, error.HttpTimeout, error.HttpTlsError => "Network error contacting provider. Check base_url, DNS, proxy, and TLS certificates, then try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
                     error.NoResponseContent => "Model returned an empty response. Please try again.",
                     error.OutOfMemory => "Out of memory.",

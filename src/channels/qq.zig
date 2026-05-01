@@ -163,7 +163,7 @@ fn downloadImageAttachmentToLocal(
         break :blk header_buf[0..1];
     } else &.{};
 
-    const image_bytes = root.http_util.curlGet(allocator, image_url, headers, "30") catch {
+    const image_bytes = root.http_util.httpGet(allocator, image_url, headers, "30") catch {
         return null;
     };
     defer allocator.free(image_bytes);
@@ -541,7 +541,7 @@ pub fn fetchGatewayUrl(allocator: std.mem.Allocator, access_token: []const u8, s
     var auth_buf: [512]u8 = undefined;
     const auth_header = try buildAuthHeader(&auth_buf, access_token);
 
-    const resp_body = root.http_util.curlGet(allocator, resolve_url, &.{auth_header}, "15") catch |err| {
+    const resp_body = root.http_util.httpGet(allocator, resolve_url, &.{auth_header}, "15") catch |err| {
         log.err("QQ gateway resolve request failed: {}", .{err});
         return error.GatewayFetchFailed;
     };
@@ -678,7 +678,7 @@ pub fn fetchAccessToken(allocator: std.mem.Allocator, app_id: []const u8, app_se
     try root.json_util.appendJsonString(&body_buf, allocator, app_secret);
     try body_buf.appendSlice(allocator, "}");
 
-    const resp_body = root.http_util.curlPost(allocator, TOKEN_URL, body_buf.items, &.{}) catch |err| {
+    const resp_body = root.http_util.httpPost(allocator, TOKEN_URL, body_buf.items, &.{}) catch |err| {
         log.err("QQ getAppAccessToken request failed: {}", .{err});
         return error.TokenFetchFailed;
     };
@@ -1414,7 +1414,7 @@ pub const QQChannel = struct {
 
         log.info("sendChunk: POSTing to {s} ...", .{url});
 
-        const resp = root.http_util.curlPostWithStatus(self.allocator, url, body, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPostWithStatus(self.allocator, url, body, &.{auth_header}) catch |err| {
             log.err("QQ API POST failed: {}", .{err});
             return error.QQApiError;
         };
@@ -1479,7 +1479,7 @@ pub const QQChannel = struct {
 
         const upload_body = try buildMediaUploadBody(self.allocator, image_url);
         defer self.allocator.free(upload_body);
-        const upload_resp = root.http_util.curlPostWithStatus(self.allocator, files_url, upload_body, &.{auth_header}) catch |err| {
+        const upload_resp = root.http_util.httpPostWithStatus(self.allocator, files_url, upload_body, &.{auth_header}) catch |err| {
             log.err("QQ media upload failed: {}", .{err});
             return error.QQApiError;
         };
@@ -1506,7 +1506,7 @@ pub const QQChannel = struct {
             if (msg_id != null) msg_seq else null,
         );
         defer self.allocator.free(media_body);
-        const send_resp = root.http_util.curlPostWithStatus(self.allocator, message_url, media_body, &.{auth_header}) catch |err| {
+        const send_resp = root.http_util.httpPostWithStatus(self.allocator, message_url, media_body, &.{auth_header}) catch |err| {
             log.err("QQ media send failed: {}", .{err});
             return error.QQApiError;
         };

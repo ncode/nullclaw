@@ -174,7 +174,7 @@ pub const WeixinChannel = struct {
         var headers = try AuthHeaderSet.init(self.allocator, token);
         defer headers.deinit(self.allocator);
 
-        const resp_body = root.http_util.curlPostWithProxy(
+        const resp_body = root.http_util.httpPostWithProxy(
             self.allocator,
             url,
             payload.items,
@@ -201,7 +201,7 @@ pub const WeixinChannel = struct {
         var headers = try AuthHeaderSet.init(self.allocator, self.config.token);
         defer headers.deinit(self.allocator);
 
-        const resp_body = root.http_util.curlPostWithProxy(
+        const resp_body = root.http_util.httpPostWithProxy(
             self.allocator,
             url,
             payload.items,
@@ -479,7 +479,7 @@ fn requestQrCode(allocator: std.mem.Allocator, base_url: []const u8, proxy: ?[]c
     defer allocator.free(url);
 
     const headers = ilinkHeaders();
-    const resp_body = root.http_util.curlGetWithProxy(allocator, url, &headers, SEND_TIMEOUT_SECS, proxy) catch return error.WeixinApiError;
+    const resp_body = root.http_util.httpGetWithProxy(allocator, url, &headers, SEND_TIMEOUT_SECS, proxy) catch return error.WeixinApiError;
     defer allocator.free(resp_body);
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, resp_body, .{}) catch return error.WeixinApiError;
@@ -507,7 +507,7 @@ fn pollQrStatus(allocator: std.mem.Allocator, base_url: []const u8, qrcode: []co
     defer allocator.free(url);
 
     const headers = ilinkHeaders();
-    const resp_body = root.http_util.curlGetWithProxy(allocator, url, &headers, GET_UPDATES_TIMEOUT_SECS, proxy) catch return error.WeixinApiError;
+    const resp_body = root.http_util.httpGetWithProxy(allocator, url, &headers, GET_UPDATES_TIMEOUT_SECS, proxy) catch return error.WeixinApiError;
     defer allocator.free(resp_body);
 
     return parseStatusResponse(allocator, resp_body);

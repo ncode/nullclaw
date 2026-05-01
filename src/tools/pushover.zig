@@ -92,11 +92,11 @@ pub const PushoverTool = struct {
             try body_buf.appendSlice(allocator, encoded_sound);
         }
 
-        // Send via http_util form POST (pipes body via stdin to avoid argv length limits).
+        // Send via native http_util form POST.
         // Skipped in tests to avoid real network calls (AGENTS.md §3.6).
         if (builtin.is_test) return ToolResult.ok("Notification sent successfully");
-        const response = http_util.curlPostForm(allocator, PUSHOVER_API_URL, body_buf.items) catch
-            return ToolResult.fail("Failed to send Pushover request via curl");
+        const response = http_util.httpPostForm(allocator, PUSHOVER_API_URL, body_buf.items) catch
+            return ToolResult.fail("Failed to send Pushover request");
         defer allocator.free(response);
 
         // Check for {"status":1} in response

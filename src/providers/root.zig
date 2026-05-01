@@ -62,8 +62,8 @@ pub const serializeMessageContent = helpers.serializeMessageContent;
 pub const serializeContentPart = helpers.serializeContentPart;
 pub const convertToolsAnthropic = helpers.convertToolsAnthropic;
 pub const convertToolsResponses = helpers.convertToolsResponses;
-pub const curlPostTimed = helpers.curlPostTimed;
-pub const curlPostFormTimed = helpers.curlPostFormTimed;
+pub const httpPostTimed = helpers.httpPostTimed;
+pub const httpPostFormTimed = helpers.httpPostFormTimed;
 pub const extractContent = helpers.extractContent;
 pub const SplitThinkContent = helpers.SplitThinkContent;
 pub const splitThinkContent = helpers.splitThinkContent;
@@ -74,7 +74,7 @@ pub const appendOpenAiBodyExtraParams = helpers.appendOpenAiBodyExtraParams;
 
 // Direct re-exports from utility modules
 pub const appendJsonString = json_util.appendJsonString;
-pub const curlPost = http_util.curlPost;
+pub const httpPost = http_util.httpPost;
 
 // ════════════════════════════════════════════════════════════════════════════
 // Core Types
@@ -320,7 +320,7 @@ pub const ChatRequest = struct {
     temperature: f64 = 0.7,
     max_tokens: ?u32 = null,
     tools: ?[]const ToolSpec = null,
-    /// Max seconds to wait for the HTTP response (curl --max-time). 0 = no limit.
+    /// Max seconds to wait for the HTTP response. 0 = no limit.
     timeout_secs: u64 = 0,
     /// Reasoning effort for reasoning models (o1, o3, gpt-5*). null = don't send.
     reasoning_effort: ?[]const u8 = null,

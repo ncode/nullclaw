@@ -584,7 +584,7 @@ fn download_bytes_to_local(
     if (comptime builtin.is_test) return null;
     if (!std.mem.startsWith(u8, source_url, "https://")) return null;
 
-    const bytes = http_util.curlGetMaxBytes(allocator, source_url, &.{}, "30", ATTACHMENT_MAX_BYTES) catch return null;
+    const bytes = http_util.httpGetMaxBytes(allocator, source_url, &.{}, "30", ATTACHMENT_MAX_BYTES) catch return null;
     defer allocator.free(bytes);
     if (bytes.len == 0 or bytes.len > ATTACHMENT_MAX_BYTES) return null;
 
@@ -869,7 +869,7 @@ pub const DingTalkChannel = struct {
         try root.json_util.appendJsonString(&body, self.allocator, self.client_secret);
         try body.appendSlice(self.allocator, "}");
 
-        const resp = http_util.curlPostWithStatus(self.allocator, ACCESS_TOKEN_URL, body.items, &.{}) catch return error.DingTalkApiError;
+        const resp = http_util.httpPostWithStatus(self.allocator, ACCESS_TOKEN_URL, body.items, &.{}) catch return error.DingTalkApiError;
         defer self.allocator.free(resp.body);
         if (!status_code_is_success(resp.status_code)) return error.DingTalkApiError;
 
@@ -909,7 +909,7 @@ pub const DingTalkChannel = struct {
         const body = try build_open_connection_body(self.allocator, self.client_id, self.client_secret);
         defer self.allocator.free(body);
 
-        const resp = http_util.curlPostWithStatus(self.allocator, OPEN_CONNECTION_URL, body, &.{}) catch return error.DingTalkApiError;
+        const resp = http_util.httpPostWithStatus(self.allocator, OPEN_CONNECTION_URL, body, &.{}) catch return error.DingTalkApiError;
         defer self.allocator.free(resp.body);
         if (!status_code_is_success(resp.status_code)) return error.DingTalkApiError;
 
@@ -942,7 +942,7 @@ pub const DingTalkChannel = struct {
         try root.json_util.appendJsonString(&body, self.allocator, download_code);
         try body.appendSlice(self.allocator, "}");
 
-        const resp = http_util.curlPostWithStatus(self.allocator, DOWNLOAD_FILE_URL, body.items, &.{access_header}) catch return null;
+        const resp = http_util.httpPostWithStatus(self.allocator, DOWNLOAD_FILE_URL, body.items, &.{access_header}) catch return null;
         defer self.allocator.free(resp.body);
         if (!status_code_is_success(resp.status_code)) return null;
 
@@ -1054,7 +1054,7 @@ pub const DingTalkChannel = struct {
 
         if (comptime builtin.is_test) return;
 
-        const resp = http_util.curlPostWithStatus(self.allocator, target.webhook_url, body, &.{}) catch return error.DingTalkApiError;
+        const resp = http_util.httpPostWithStatus(self.allocator, target.webhook_url, body, &.{}) catch return error.DingTalkApiError;
         defer self.allocator.free(resp.body);
         if (!status_code_is_success(resp.status_code)) return error.DingTalkApiError;
     }
@@ -1075,7 +1075,7 @@ pub const DingTalkChannel = struct {
 
         if (comptime builtin.is_test) return;
 
-        const resp = http_util.curlPostWithStatus(self.allocator, AI_INTERACTION_SEND_URL, body, &.{access_header}) catch return error.DingTalkApiError;
+        const resp = http_util.httpPostWithStatus(self.allocator, AI_INTERACTION_SEND_URL, body, &.{access_header}) catch return error.DingTalkApiError;
         defer self.allocator.free(resp.body);
         if (!status_code_is_success(resp.status_code)) return error.DingTalkApiError;
         try validate_ai_interaction_response(self.allocator, resp.body);
@@ -1102,7 +1102,7 @@ pub const DingTalkChannel = struct {
             return self.allocator.dupe(u8, "test-conversation-token");
         }
 
-        const resp = http_util.curlPostWithStatus(self.allocator, AI_INTERACTION_PREPARE_URL, body, &.{access_header}) catch return error.DingTalkApiError;
+        const resp = http_util.httpPostWithStatus(self.allocator, AI_INTERACTION_PREPARE_URL, body, &.{access_header}) catch return error.DingTalkApiError;
         defer self.allocator.free(resp.body);
         if (!status_code_is_success(resp.status_code)) return error.DingTalkApiError;
         try validate_ai_interaction_response(self.allocator, resp.body);
@@ -1125,7 +1125,7 @@ pub const DingTalkChannel = struct {
 
         if (comptime builtin.is_test) return;
 
-        const resp = http_util.curlPostWithStatus(self.allocator, AI_INTERACTION_UPDATE_URL, body, &.{access_header}) catch return error.DingTalkApiError;
+        const resp = http_util.httpPostWithStatus(self.allocator, AI_INTERACTION_UPDATE_URL, body, &.{access_header}) catch return error.DingTalkApiError;
         defer self.allocator.free(resp.body);
         if (!status_code_is_success(resp.status_code)) return error.DingTalkApiError;
         try validate_ai_interaction_response(self.allocator, resp.body);
@@ -1147,7 +1147,7 @@ pub const DingTalkChannel = struct {
 
         if (comptime builtin.is_test) return;
 
-        const resp = http_util.curlPostWithStatus(self.allocator, AI_INTERACTION_FINISH_URL, body, &.{access_header}) catch return error.DingTalkApiError;
+        const resp = http_util.httpPostWithStatus(self.allocator, AI_INTERACTION_FINISH_URL, body, &.{access_header}) catch return error.DingTalkApiError;
         defer self.allocator.free(resp.body);
         if (!status_code_is_success(resp.status_code)) return error.DingTalkApiError;
         try validate_ai_interaction_response(self.allocator, resp.body);

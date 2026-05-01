@@ -99,7 +99,7 @@ pub const TeamsChannel = struct {
         try writeUrlEncoded(bw, self.client_secret);
         try bw.writeAll("&scope=https%3A%2F%2Fapi.botframework.com%2F.default");
 
-        const resp = root.http_util.curlPostForm(self.allocator, token_url, body_list.items) catch |err| {
+        const resp = root.http_util.httpPostForm(self.allocator, token_url, body_list.items) catch |err| {
             log.err("Teams OAuth2 token request failed: {}", .{err});
             return error.TeamsTokenError;
         };
@@ -193,7 +193,7 @@ pub const TeamsChannel = struct {
         try auth_writer.print("Authorization: Bearer {s}", .{token});
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.curlPost(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
             log.err("Teams Bot Framework POST failed: {}", .{err});
             return error.TeamsSendError;
         };
@@ -250,7 +250,7 @@ pub const TeamsChannel = struct {
         try auth_writer.print("Authorization: Bearer {s}", .{token});
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.curlPut(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPut(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
             log.err("Teams Bot Framework PUT (update) failed: {}", .{err});
             return error.TeamsSendError;
         };
@@ -458,7 +458,7 @@ pub const TeamsChannel = struct {
         const auth_header = auth_writer.buffered();
 
         // Send typing indicator
-        const resp = root.http_util.curlPost(self.allocator, url, "{\"type\":\"typing\"}", &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, url, "{\"type\":\"typing\"}", &.{auth_header}) catch |err| {
             log.warn("Teams typing indicator failed: {}", .{err});
             return;
         };

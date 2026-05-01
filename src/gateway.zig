@@ -2436,7 +2436,6 @@ pub fn sendTelegramReply(
     message_thread_id: ?i64,
     text: []const u8,
 ) !void {
-    // Build the curl command to call the Telegram API
     const url = try std.fmt.allocPrint(allocator, "https://api.telegram.org/bot{s}/sendMessage", .{bot_token});
     defer allocator.free(url);
 
@@ -2465,24 +2464,20 @@ pub fn sendTelegramReply(
 
     const body = body_buf.items;
 
-    var curl_child = std_compat.process.Child.init(
-        &[_][]const u8{
-            "curl", "-s",                             "-X", "POST",
-            "-H",   "Content-Type: application/json", "-d", body,
-            url,
-        },
-        allocator,
-    );
-    curl_child.stdout_behavior = .Pipe;
-    curl_child.stderr_behavior = .Pipe;
-
-    curl_child.spawn() catch return;
-    _ = curl_child.wait() catch {};
+    const response = http_util.nativeHttpRequest(allocator, .{
+        .method = .POST,
+        .url = url,
+        .payload = body,
+        .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+        .max_response_bytes = 1024 * 1024,
+        .fail_on_http_error = false,
+    }) catch return;
+    response.deinit(allocator);
 }
 
 fn userFacingAgentError(err: anyerror) []const u8 {
     return switch (err) {
-        error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError, error.CurlDnsError, error.CurlConnectError, error.CurlTimeout, error.CurlTlsError => "Network error contacting provider. Check base_url, DNS, proxy, and TLS certificates, then try again.",
+        error.HttpFailed, error.HttpReadError, error.HttpWaitError, error.HttpWriteError, error.HttpDnsError, error.HttpConnectError, error.HttpTimeout, error.HttpTlsError => "Network error contacting provider. Check base_url, DNS, proxy, and TLS certificates, then try again.",
         error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
         error.AllProvidersFailed => "All configured providers failed for this request. Check model/provider compatibility and credentials.",
         error.NoResponseContent => "Model returned an empty response. Please try again.",
@@ -2493,7 +2488,7 @@ fn userFacingAgentError(err: anyerror) []const u8 {
 
 fn userFacingAgentErrorJson(err: anyerror) []const u8 {
     return switch (err) {
-        error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError, error.CurlDnsError, error.CurlConnectError, error.CurlTimeout, error.CurlTlsError => "{\"error\":\"network error contacting provider\"}",
+        error.HttpFailed, error.HttpReadError, error.HttpWaitError, error.HttpWriteError, error.HttpDnsError, error.HttpConnectError, error.HttpTimeout, error.HttpTlsError => "{\"error\":\"network error contacting provider\"}",
         error.ProviderDoesNotSupportVision => "{\"error\":\"provider does not support image input\"}",
         error.AllProvidersFailed => "{\"error\":\"all providers failed for this request\"}",
         error.NoResponseContent => "{\"error\":\"model returned empty response\"}",
@@ -5764,6 +5759,33 @@ pub fn run(
 
 // ── Tests ────────────────────────────────────────────────────────
 
+test "sendTelegramReply native migration posts escaped JSON" {
+    const allocator = std.testing.allocator;
+    const State = struct {
+        var called = false;
+
+        fn handle(alloc: std.mem.Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            called = true;
+            try std.testing.expectEqual(std.http.Method.POST, request.method);
+            try std.testing.expectEqualStrings("https://api.telegram.org/bottest-token/sendMessage", request.url);
+            try std.testing.expectEqualStrings("Content-Type", request.headers[0].name);
+            try std.testing.expectEqualStrings("application/json", request.headers[0].value);
+            try std.testing.expect(request.payload != null);
+            try std.testing.expect(std.mem.indexOf(u8, request.payload.?, "\"chat_id\":42") != null);
+            try std.testing.expect(std.mem.indexOf(u8, request.payload.?, "\"message_thread_id\":7") != null);
+            try std.testing.expect(std.mem.indexOf(u8, request.payload.?, "hello\\n\\\"world\\\"") != null);
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "{\"ok\":true}") };
+        }
+    };
+    State.called = false;
+
+    http_util.setTestNativeHttpHandler(State.handle);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    try sendTelegramReply(allocator, "test-token", 42, 7, "hello\n\"world\"");
+    try std.testing.expect(State.called);
+}
+
 test "cron auth matrix: no pairing guard allows all" {
     // When pairing is not configured, admin routes stay open.
     try std.testing.expect(isWebhookAuthorized(null, null) == false); // webhook still fails
@@ -8762,10 +8784,10 @@ test "userFacingAgentError maps NoResponseContent" {
     );
 }
 
-test "userFacingAgentError maps CurlFailed with actionable hint" {
+test "userFacingAgentError maps HttpFailed with actionable hint" {
     try std.testing.expectEqualStrings(
         "Network error contacting provider. Check base_url, DNS, proxy, and TLS certificates, then try again.",
-        userFacingAgentError(error.CurlFailed),
+        userFacingAgentError(error.HttpFailed),
     );
 }
 
@@ -8790,10 +8812,10 @@ test "userFacingAgentErrorJson maps NoResponseContent" {
     );
 }
 
-test "userFacingAgentErrorJson maps CurlFailed" {
+test "userFacingAgentErrorJson maps HttpFailed" {
     try std.testing.expectEqualStrings(
         "{\"error\":\"network error contacting provider\"}",
-        userFacingAgentErrorJson(error.CurlFailed),
+        userFacingAgentErrorJson(error.HttpFailed),
     );
 }
 

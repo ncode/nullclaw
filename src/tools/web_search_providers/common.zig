@@ -38,7 +38,7 @@ pub fn logRequestError(provider: []const u8, query: []const u8, err: anytype) vo
     log.err("web_search ({s}) request failed for '{s}': {}", .{ provider, query, err });
 }
 
-pub fn curlGet(
+pub fn httpGet(
     allocator: std.mem.Allocator,
     url: []const u8,
     headers: []const []const u8,
@@ -46,16 +46,16 @@ pub fn curlGet(
 ) (ProviderSearchError || error{OutOfMemory})![]u8 {
     if (builtin.is_test) return error.RequestFailed;
 
-    return http_util.curlGet(allocator, url, headers, timeout_secs) catch |err| switch (err) {
+    return http_util.httpGet(allocator, url, headers, timeout_secs) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
-            log.err("curl GET failed: {s} (timeout={s}s)", .{ @errorName(err), timeout_secs });
+            log.err("HTTP GET failed: {s} (timeout={s}s)", .{ @errorName(err), timeout_secs });
             return error.RequestFailed;
         },
     };
 }
 
-pub fn curlPostJson(
+pub fn httpPostJson(
     allocator: std.mem.Allocator,
     url: []const u8,
     body: []const u8,
@@ -64,10 +64,10 @@ pub fn curlPostJson(
 ) (ProviderSearchError || error{OutOfMemory})![]u8 {
     if (builtin.is_test) return error.RequestFailed;
 
-    return http_util.curlPostWithProxy(allocator, url, body, headers, null, timeout_secs) catch |err| switch (err) {
+    return http_util.httpPostWithProxy(allocator, url, body, headers, null, timeout_secs) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
-            log.err("curl POST failed: {s} (timeout={s}s)", .{ @errorName(err), timeout_secs });
+            log.err("HTTP POST failed: {s} (timeout={s}s)", .{ @errorName(err), timeout_secs });
             return error.RequestFailed;
         },
     };

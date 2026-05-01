@@ -207,7 +207,7 @@ pub const MattermostChannel = struct {
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
 
-        const resp = root.http_util.curlPost(self.allocator, url, body.items, &headers) catch return;
+        const resp = root.http_util.httpPost(self.allocator, url, body.items, &headers) catch return;
         self.allocator.free(resp);
     }
 
@@ -243,7 +243,7 @@ pub const MattermostChannel = struct {
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
 
-        const resp = root.http_util.curlPost(self.allocator, url, body.items, &headers) catch return error.MattermostApiError;
+        const resp = root.http_util.httpPost(self.allocator, url, body.items, &headers) catch return error.MattermostApiError;
         defer self.allocator.free(resp);
 
         if (std.mem.indexOf(u8, resp, "\"id\"") == null) {
@@ -262,7 +262,7 @@ pub const MattermostChannel = struct {
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
 
-        const resp = root.http_util.curlGet(self.allocator, url, &headers, "15") catch return error.MattermostApiError;
+        const resp = root.http_util.httpGet(self.allocator, url, &headers, "15") catch return error.MattermostApiError;
         defer self.allocator.free(resp);
 
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp, .{}) catch return error.MattermostApiError;
@@ -294,7 +294,7 @@ pub const MattermostChannel = struct {
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
 
-        const resp = root.http_util.curlPost(self.allocator, url, body.items, &headers) catch return error.MattermostApiError;
+        const resp = root.http_util.httpPost(self.allocator, url, body.items, &headers) catch return error.MattermostApiError;
         defer self.allocator.free(resp);
 
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp, .{}) catch return error.MattermostApiError;
@@ -316,7 +316,7 @@ pub const MattermostChannel = struct {
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
 
-        const resp = root.http_util.curlGet(self.allocator, url, &headers, "15") catch return error.MattermostApiError;
+        const resp = root.http_util.httpGet(self.allocator, url, &headers, "15") catch return error.MattermostApiError;
         defer self.allocator.free(resp);
 
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp, .{}) catch return error.MattermostApiError;
@@ -711,7 +711,7 @@ pub const MattermostChannel = struct {
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
 
-        const data = root.http_util.curlGet(self.allocator, url, &headers, "20") catch return null;
+        const data = root.http_util.httpGet(self.allocator, url, &headers, "20") catch return null;
         defer self.allocator.free(data);
         if (data.len == 0) return null;
 

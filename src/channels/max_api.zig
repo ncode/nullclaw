@@ -105,7 +105,7 @@ pub const Client = struct {
         const url = try buildUrl(&url_buf, "/me", null);
         var auth_buf: [512]u8 = undefined;
         const auth = try self.authHeader(&auth_buf);
-        return root.http_util.curlGetWithProxy(allocator, url, &.{auth}, "10", self.proxy);
+        return root.http_util.httpGetWithProxy(allocator, url, &.{auth}, "10", self.proxy);
     }
 
     pub fn getMeOk(self: Client) bool {
@@ -176,7 +176,7 @@ pub const Client = struct {
 
         var auth_buf: [512]u8 = undefined;
         const auth = try self.authHeader(&auth_buf);
-        return root.http_util.curlPostWithProxy(allocator, url, body_json, &.{auth}, self.proxy, "30");
+        return root.http_util.httpPostWithProxy(allocator, url, body_json, &.{auth}, self.proxy, "30");
     }
 
     pub fn parseSentMessageMid(allocator: std.mem.Allocator, json: []const u8) ?SentMessageMeta {
@@ -212,7 +212,7 @@ pub const Client = struct {
 
         var auth_buf: [512]u8 = undefined;
         const auth = try self.authHeader(&auth_buf);
-        return root.http_util.curlPut(allocator, url, body_json, &.{auth});
+        return root.http_util.httpPut(allocator, url, body_json, &.{auth});
     }
 
     pub fn deleteMessage(self: Client, allocator: std.mem.Allocator, message_id: []const u8) !void {
@@ -227,7 +227,7 @@ pub const Client = struct {
 
         var auth_buf: [512]u8 = undefined;
         const auth = try self.authHeader(&auth_buf);
-        try curlDelete(allocator, url, auth, self.proxy);
+        try deleteRequest(allocator, url, auth, self.proxy);
     }
 
     // ── Callbacks ───────────────────────────────────────────────────────
@@ -270,7 +270,7 @@ pub const Client = struct {
 
         var auth_buf: [512]u8 = undefined;
         const auth = try self.authHeader(&auth_buf);
-        const resp = try root.http_util.curlPostWithProxy(allocator, url, body.items, &.{auth}, self.proxy, "10");
+        const resp = try root.http_util.httpPostWithProxy(allocator, url, body.items, &.{auth}, self.proxy, "10");
         allocator.free(resp);
     }
 
@@ -299,7 +299,7 @@ pub const Client = struct {
         const timeout_val = std.fmt.parseInt(u32, timeout, 10) catch 30;
         const max_time = std.fmt.bufPrint(&timeout_buf, "{d}", .{timeout_val + 5}) catch "35";
 
-        return root.http_util.curlGetWithProxy(allocator, url, &.{auth}, max_time, self.proxy);
+        return root.http_util.httpGetWithProxy(allocator, url, &.{auth}, max_time, self.proxy);
     }
 
     // ── Subscriptions (webhooks) ────────────────────────────────────────
@@ -332,7 +332,7 @@ pub const Client = struct {
 
         var auth_buf: [512]u8 = undefined;
         const auth = try self.authHeader(&auth_buf);
-        return root.http_util.curlPostWithProxy(allocator, url, body.items, &.{auth}, self.proxy, "10");
+        return root.http_util.httpPostWithProxy(allocator, url, body.items, &.{auth}, self.proxy, "10");
     }
 
     pub fn unsubscribe(self: Client, allocator: std.mem.Allocator, webhook_url: []const u8) !void {
@@ -347,7 +347,7 @@ pub const Client = struct {
 
         var auth_buf: [512]u8 = undefined;
         const auth = try self.authHeader(&auth_buf);
-        try curlDelete(allocator, url, auth, self.proxy);
+        try deleteRequest(allocator, url, auth, self.proxy);
     }
 
     // ── Typing indicator ────────────────────────────────────────────────
@@ -365,7 +365,7 @@ pub const Client = struct {
         const body = "{\"action\":\"typing_on\"}";
         var auth_buf: [512]u8 = undefined;
         const auth = try self.authHeader(&auth_buf);
-        const resp = try root.http_util.curlPostWithProxy(allocator, url, body, &.{auth}, self.proxy, "10");
+        const resp = try root.http_util.httpPostWithProxy(allocator, url, body, &.{auth}, self.proxy, "10");
         allocator.free(resp);
     }
 
@@ -385,14 +385,14 @@ pub const Client = struct {
 
         var auth_buf: [512]u8 = undefined;
         const auth = try self.authHeader(&auth_buf);
-        const upload_init_resp = try root.http_util.curlPostWithProxy(allocator, url, "", &.{auth}, self.proxy, "30");
+        const upload_init_resp = try root.http_util.httpPostWithProxy(allocator, url, "", &.{auth}, self.proxy, "30");
         errdefer allocator.free(upload_init_resp);
 
-        const upload_desc = parseUploadDescriptor(allocator, upload_init_resp) orelse return error.CurlFailed;
+        const upload_desc = parseUploadDescriptor(allocator, upload_init_resp) orelse return error.HttpFailed;
         defer upload_desc.deinit(allocator);
 
-        const upload_url = upload_desc.url orelse return error.CurlFailed;
-        const upload_resp = try curlMultipartUpload(allocator, upload_url, auth, self.proxy, file_path);
+        const upload_url = upload_desc.url orelse return error.HttpFailed;
+        const upload_resp = try multipartUpload(allocator, upload_url, auth, self.proxy, file_path);
 
         if (upload_desc.token != null) {
             allocator.free(upload_resp);
@@ -437,121 +437,64 @@ pub const Client = struct {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// Internal: DELETE via curl subprocess
+// Internal HTTP helpers
 // ════════════════════════════════════════════════════════════════════════════
 
-fn curlDelete(allocator: std.mem.Allocator, url: []const u8, auth_header: []const u8, proxy: ?[]const u8) !void {
-    var argv_buf: [14][]const u8 = undefined;
-    var argc: usize = 0;
+fn deleteRequest(allocator: std.mem.Allocator, url: []const u8, auth_header: []const u8, proxy: ?[]const u8) !void {
+    var headers: std.ArrayListUnmanaged(std.http.Header) = .empty;
+    defer headers.deinit(allocator);
+    try root.http_util.appendHeaderLines(&headers, allocator, &.{auth_header});
 
-    argv_buf[argc] = "curl";
-    argc += 1;
-    argv_buf[argc] = "-s";
-    argc += 1;
-    argv_buf[argc] = "-X";
-    argc += 1;
-    argv_buf[argc] = "DELETE";
-    argc += 1;
-    argv_buf[argc] = "-m";
-    argc += 1;
-    argv_buf[argc] = "10";
-    argc += 1;
-    argv_buf[argc] = "-H";
-    argc += 1;
-    argv_buf[argc] = auth_header;
-    argc += 1;
-
-    if (proxy) |p| {
-        argv_buf[argc] = "-x";
-        argc += 1;
-        argv_buf[argc] = p;
-        argc += 1;
-    }
-
-    argv_buf[argc] = url;
-    argc += 1;
-
-    var child = std_compat.process.Child.init(argv_buf[0..argc], allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 256 * 1024) catch {
-        _ = child.kill() catch {};
-        _ = child.wait() catch {};
-        return error.CurlReadError;
-    };
-    defer allocator.free(stdout);
-
-    const term = child.wait() catch return error.CurlWaitError;
-    switch (term) {
-        .exited => |code| if (code != 0) return error.CurlFailed,
-        else => return error.CurlFailed,
-    }
+    const response = try root.http_util.nativeHttpRequest(allocator, .{
+        .method = .DELETE,
+        .url = url,
+        .headers = headers.items,
+        .proxy = proxy,
+        .timeout_secs = 10,
+        .max_response_bytes = 256 * 1024,
+        .fail_on_http_error = false,
+    });
+    response.deinit(allocator);
 }
 
-fn curlMultipartUpload(
+fn multipartUpload(
     allocator: std.mem.Allocator,
     url: []const u8,
     auth_header: []const u8,
     proxy: ?[]const u8,
     file_path: []const u8,
 ) ![]u8 {
-    var file_arg_buf: [1024]u8 = undefined;
-    var file_writer: std.Io.Writer = .fixed(&file_arg_buf);
-    try file_writer.print("data=@{s}", .{file_path});
-    const file_arg = file_writer.buffered();
+    const boundary = "nullclaw-max-upload-boundary";
+    const file = std_compat.fs.openFileAbsolute(file_path, .{}) catch return error.HttpReadError;
+    defer file.close();
+    const file_data = file.readToEndAlloc(allocator, 64 * 1024 * 1024) catch return error.HttpReadError;
+    defer allocator.free(file_data);
 
-    var argv_buf: [18][]const u8 = undefined;
-    var argc: usize = 0;
-    argv_buf[argc] = "curl";
-    argc += 1;
-    argv_buf[argc] = "-s";
-    argc += 1;
-    argv_buf[argc] = "-m";
-    argc += 1;
-    argv_buf[argc] = "120";
-    argc += 1;
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(allocator);
+    try body.appendSlice(allocator, "--" ++ boundary ++ "\r\n");
+    try body.appendSlice(allocator, "Content-Disposition: form-data; name=\"data\"; filename=\"upload\"\r\n");
+    try body.appendSlice(allocator, "Content-Type: application/octet-stream\r\n\r\n");
+    try body.appendSlice(allocator, file_data);
+    try body.appendSlice(allocator, "\r\n--" ++ boundary ++ "--\r\n");
 
-    if (proxy) |p| {
-        argv_buf[argc] = "--proxy";
-        argc += 1;
-        argv_buf[argc] = p;
-        argc += 1;
-    }
+    const content_type = "Content-Type: multipart/form-data; boundary=" ++ boundary;
+    var headers: std.ArrayListUnmanaged(std.http.Header) = .empty;
+    defer headers.deinit(allocator);
+    try root.http_util.appendHeaderLines(&headers, allocator, &.{ auth_header, content_type });
 
-    argv_buf[argc] = "-H";
-    argc += 1;
-    argv_buf[argc] = auth_header;
-    argc += 1;
-    argv_buf[argc] = "-F";
-    argc += 1;
-    argv_buf[argc] = file_arg;
-    argc += 1;
-    argv_buf[argc] = url;
-    argc += 1;
-
-    var child = std_compat.process.Child.init(argv_buf[0..argc], allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
-    const term = child.wait() catch {
-        allocator.free(stdout);
-        return error.CurlWaitError;
-    };
-    switch (term) {
-        .exited => |code| if (code != 0) {
-            allocator.free(stdout);
-            return error.CurlFailed;
-        },
-        else => {
-            allocator.free(stdout);
-            return error.CurlFailed;
-        },
-    }
-    return stdout;
+    const response = try root.http_util.nativeHttpRequest(allocator, .{
+        .method = .POST,
+        .url = url,
+        .payload = body.items,
+        .headers = headers.items,
+        .proxy = proxy,
+        .timeout_secs = 120,
+        .max_response_bytes = 1024 * 1024,
+        .fail_on_http_error = false,
+    });
+    defer if (response.headers.len > 0) allocator.free(response.headers);
+    return response.body;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -876,4 +819,70 @@ test "MAX_MESSAGE_LEN is 4000" {
 
 test "BASE_URL is correct" {
     try std.testing.expectEqualStrings("https://platform-api.max.ru", BASE_URL);
+}
+
+test "max deleteRequest native migration sends auth proxy and timeout" {
+    const allocator = std.testing.allocator;
+    const handler = struct {
+        fn handle(alloc: std.mem.Allocator, request: root.http_util.NativeHttpRequest) anyerror!root.http_util.NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.DELETE, request.method);
+            try std.testing.expectEqualStrings("https://platform-api.max.ru/messages?message_id=m1", request.url);
+            try std.testing.expectEqualStrings("socks5://127.0.0.1:1080", request.proxy.?);
+            try std.testing.expectEqual(@as(?u64, 10), request.timeout_secs);
+            try std.testing.expectEqualStrings("Authorization", request.headers[0].name);
+            try std.testing.expectEqualStrings("token", request.headers[0].value);
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "") };
+        }
+    }.handle;
+
+    root.http_util.setTestNativeHttpHandler(handler);
+    defer root.http_util.setTestNativeHttpHandler(null);
+
+    try deleteRequest(
+        allocator,
+        "https://platform-api.max.ru/messages?message_id=m1",
+        "Authorization: token",
+        "socks5://127.0.0.1:1080",
+    );
+}
+
+test "max multipartUpload native migration sends data form field" {
+    const allocator = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    {
+        var file = try std_compat.fs.Dir.wrap(tmp_dir.dir).createFile("upload.bin", .{});
+        defer file.close();
+        try file.writeAll("payload-bytes");
+    }
+    const file_path = try std_compat.fs.Dir.wrap(tmp_dir.dir).realpathAlloc(allocator, "upload.bin");
+    defer allocator.free(file_path);
+
+    const handler = struct {
+        fn handle(alloc: std.mem.Allocator, request: root.http_util.NativeHttpRequest) anyerror!root.http_util.NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.POST, request.method);
+            try std.testing.expectEqualStrings("https://upload.example/max", request.url);
+            try std.testing.expectEqual(@as(?u64, 120), request.timeout_secs);
+            try std.testing.expect(request.payload != null);
+            try std.testing.expect(std.mem.indexOf(u8, request.payload.?, "name=\"data\"") != null);
+            try std.testing.expect(std.mem.indexOf(u8, request.payload.?, "payload-bytes") != null);
+            var saw_content_type = false;
+            for (request.headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Content-Type")) {
+                    saw_content_type = true;
+                    try std.testing.expect(std.mem.startsWith(u8, header.value, "multipart/form-data; boundary="));
+                }
+            }
+            try std.testing.expect(saw_content_type);
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "{\"token\":\"uploaded\"}") };
+        }
+    }.handle;
+
+    root.http_util.setTestNativeHttpHandler(handler);
+    defer root.http_util.setTestNativeHttpHandler(null);
+
+    const response = try multipartUpload(allocator, "https://upload.example/max", "Authorization: token", null, file_path);
+    defer allocator.free(response);
+    try std.testing.expectEqualStrings("{\"token\":\"uploaded\"}", response);
 }

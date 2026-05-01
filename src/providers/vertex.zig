@@ -309,7 +309,7 @@ pub const VertexProvider = struct {
         const auth_hdr = try self.buildAuthHeader(allocator);
         defer allocator.free(auth_hdr);
 
-        const resp_body = root.curlPostTimed(allocator, url, body, &.{auth_hdr}, 0) catch return error.VertexApiError;
+        const resp_body = root.httpPostTimed(allocator, url, body, &.{auth_hdr}, 0) catch return error.VertexApiError;
         defer allocator.free(resp_body);
 
         return gemini.GeminiProvider.parseResponse(allocator, resp_body);
@@ -335,7 +335,7 @@ pub const VertexProvider = struct {
         const auth_hdr = try self.buildAuthHeader(allocator);
         defer allocator.free(auth_hdr);
 
-        const resp_body = root.curlPostTimed(allocator, url, body, &.{auth_hdr}, request.timeout_secs) catch return error.VertexApiError;
+        const resp_body = root.httpPostTimed(allocator, url, body, &.{auth_hdr}, request.timeout_secs) catch return error.VertexApiError;
         defer allocator.free(resp_body);
 
         return try gemini.GeminiProvider.parseChatResponse(allocator, resp_body);
@@ -364,7 +364,7 @@ pub const VertexProvider = struct {
         defer allocator.free(auth_hdr);
         const headers = [_][]const u8{auth_hdr};
 
-        return gemini.GeminiProvider.curlStreamGemini(
+        return gemini.GeminiProvider.httpStreamGemini(
             allocator,
             url,
             body,
@@ -373,7 +373,7 @@ pub const VertexProvider = struct {
             callback,
             callback_ctx,
         ) catch |err| {
-            if (err == error.CurlWaitError or err == error.CurlFailed) {
+            if (err == error.HttpWaitError or err == error.HttpFailed) {
                 log.warn("Vertex streaming failed with {}; falling back to non-streaming response", .{err});
                 var fallback_request = request;
                 fallback_request.timeout_secs = gemini.GeminiProvider.streamingFallbackTimeoutSecs(request.timeout_secs);
@@ -687,7 +687,7 @@ fn requestServiceAccountAccessToken(
     try appendFormField(&form, allocator, "grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer");
     try appendFormField(&form, allocator, "assertion", assertion);
 
-    const response = root.curlPostFormTimed(
+    const response = root.httpPostFormTimed(
         allocator,
         creds.token_uri,
         form.items,

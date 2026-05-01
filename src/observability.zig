@@ -1153,9 +1153,9 @@ pub const OtelObserver = struct {
         const url_buf = std.fmt.allocPrint(self.allocator, "{s}/v1/traces", .{self.endpoint}) catch return;
         defer self.allocator.free(url_buf);
 
-        // Best-effort send; free response if successful
-        if (http_util.curlPost(self.allocator, url_buf, payload, self.headers)) |curl_resp| {
-            self.allocator.free(curl_resp);
+        // Best-effort send; free response if successful.
+        if (http_util.httpPost(self.allocator, url_buf, payload, self.headers)) |http_resp| {
+            self.allocator.free(http_resp);
         } else |_| {}
 
         // Clear spans regardless of delivery success to prevent unbounded growth
@@ -1905,7 +1905,7 @@ test "OtelObserver init custom endpoint" {
     try std.testing.expectEqualStrings("myservice", otel.service_name);
 }
 
-test "OtelObserver initWithHeaders builds curl headers" {
+test "OtelObserver initWithHeaders builds HTTP header lines" {
     const headers = [_]OtelObserver.HeaderEntry{
         .{ .key = "Authorization", .value = "Bearer secret" },
         .{ .key = "x-nullwatch-source", .value = "nullclaw" },
@@ -1916,6 +1916,42 @@ test "OtelObserver initWithHeaders builds curl headers" {
     try std.testing.expectEqual(@as(usize, 2), otel.headers.len);
     try std.testing.expectEqualStrings("Authorization: Bearer secret", otel.headers[0]);
     try std.testing.expectEqualStrings("x-nullwatch-source: nullclaw", otel.headers[1]);
+}
+
+test "OtelObserver flush posts spans through native HTTP helper" {
+    const headers = [_]OtelObserver.HeaderEntry{
+        .{ .key = "Authorization", .value = "Bearer secret" },
+    };
+    var otel = try OtelObserver.initWithHeaders(std.testing.allocator, "https://otel.example.test:4318", "svc", &headers);
+    defer otel.deinit();
+
+    const State = struct {
+        var seen = false;
+
+        fn handle(alloc: std.mem.Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            seen = true;
+            try std.testing.expectEqual(std.http.Method.POST, request.method);
+            try std.testing.expectEqualStrings("https://otel.example.test:4318/v1/traces", request.url);
+            try std.testing.expect(request.payload != null);
+            try std.testing.expect(std.mem.indexOf(u8, request.payload.?, "\"name\":\"heartbeat.tick\"") != null);
+            try std.testing.expectEqual(@as(usize, 2), request.headers.len);
+            try std.testing.expectEqualStrings("Content-Type", request.headers[0].name);
+            try std.testing.expectEqualStrings("application/json", request.headers[0].value);
+            try std.testing.expectEqualStrings("Authorization", request.headers[1].name);
+            try std.testing.expectEqualStrings("Bearer secret", request.headers[1].value);
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "") };
+        }
+    };
+    State.seen = false;
+
+    http_util.setTestNativeHttpHandler(State.handle);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    otel.observer().recordEvent(&.{ .heartbeat_tick = {} });
+    otel.observer().flush();
+
+    try std.testing.expect(State.seen);
+    try std.testing.expectEqual(@as(usize, 0), otel.spans.items.len);
 }
 
 test "OtelObserver initWithHeaders rejects remote http endpoint" {
@@ -2414,10 +2450,10 @@ test "OtelObserver batch flush at 10 spans" {
     }
     try std.testing.expectEqual(@as(usize, 9), otel.spans.items.len);
 
-    // 10th event triggers flush attempt (curl fails, spans get cleared anyway)
+    // 10th event triggers a best-effort flush attempt; spans are cleared either way.
     const event = ObserverEvent{ .heartbeat_tick = {} };
     obs.recordEvent(&event);
-    // After flush attempt (curl fails), spans are cleared
+    // After the flush attempt, spans are cleared.
     try std.testing.expect(otel.spans.items.len < 10);
 }
 
@@ -2502,7 +2538,7 @@ test "OtelObserver vtable through Observer interface" {
     obs.recordEvent(&event);
     const metric = ObserverMetric{ .tokens_used = 10 };
     obs.recordMetric(&metric);
-    obs.flush(); // flush attempt (curl fails silently)
+    obs.flush(); // best-effort flush failure is ignored.
 }
 
 test "OtelObserver requests_total counter" {

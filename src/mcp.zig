@@ -292,7 +292,6 @@ pub const McpServer = struct {
         var timeout_buf: [16]u8 = undefined;
         const timeout_str = std.fmt.bufPrint(&timeout_buf, "{d}", .{timeout_secs}) catch unreachable;
 
-        // Use curl so timeouts are enforced.
         var header_lines: std.ArrayListUnmanaged([]u8) = .empty;
         defer {
             for (header_lines.items) |line| allocator.free(line);
@@ -302,15 +301,15 @@ pub const McpServer = struct {
         for (headers_buf[0..header_count]) |h| {
             try header_lines.append(allocator, try std.fmt.allocPrint(allocator, "{s}: {s}", .{ h.name, h.value }));
         }
-        const resp = http_util.curlPostWithStatusHeadersAndTimeout(
+        const resp = http_util.httpPostWithStatusHeadersAndTimeout(
             allocator,
             url,
             msg,
             header_lines.items,
             timeout_str,
         ) catch |err| switch (err) {
-            error.CurlInterrupted => return error.HttpRequestInterrupted,
-            error.CurlFailed, error.CurlReadError, error.CurlWriteError, error.CurlWaitError, error.CurlParseError => return error.HttpRequestFailed,
+            error.HttpInterrupted => return error.HttpRequestInterrupted,
+            error.HttpFailed, error.HttpReadError, error.HttpWriteError, error.HttpWaitError, error.HttpParseError => return error.HttpRequestFailed,
             else => return err,
         };
         errdefer {

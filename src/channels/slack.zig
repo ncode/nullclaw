@@ -469,7 +469,7 @@ pub const SlackChannel = struct {
         const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{self.normalizedBotToken()});
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
-        const resp = root.http_util.curlGet(self.allocator, url, &headers, "15") catch return error.SlackApiError;
+        const resp = root.http_util.httpGet(self.allocator, url, &headers, "15") catch return error.SlackApiError;
         defer self.allocator.free(resp);
 
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp, .{}) catch return error.SlackApiError;
@@ -604,7 +604,7 @@ pub const SlackChannel = struct {
         const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{self.normalizedBotToken()});
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
-        const resp = root.http_util.curlGet(self.allocator, url, &headers, "30") catch return error.SlackApiError;
+        const resp = root.http_util.httpGet(self.allocator, url, &headers, "30") catch return error.SlackApiError;
         defer self.allocator.free(resp);
 
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp, .{}) catch return error.SlackApiError;
@@ -767,7 +767,7 @@ pub const SlackChannel = struct {
         const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{app_token});
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
-        const resp = root.http_util.curlPost(self.allocator, url, "{}", &headers) catch return error.SlackApiError;
+        const resp = root.http_util.httpPost(self.allocator, url, "{}", &headers) catch return error.SlackApiError;
         defer self.allocator.free(resp);
 
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp, .{}) catch return error.SlackApiError;
@@ -1126,7 +1126,7 @@ pub const SlackChannel = struct {
         try auth_writer.print("Authorization: Bearer {s}", .{self.normalizedBotToken()});
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.curlPost(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
             log.err("Slack API POST failed: {}", .{err});
             return error.SlackApiError;
         };
@@ -1156,7 +1156,7 @@ pub const SlackChannel = struct {
         try auth_writer.print("Authorization: Bearer {s}", .{self.normalizedBotToken()});
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.curlPost(self.allocator, API_BASE ++ "/chat.postMessage", body_list.items, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, API_BASE ++ "/chat.postMessage", body_list.items, &.{auth_header}) catch |err| {
             log.err("Slack API POST failed: {}", .{err});
             return error.SlackApiError;
         };
@@ -1195,7 +1195,7 @@ pub const SlackChannel = struct {
         auth_writer.print("Authorization: Bearer {s}", .{self.normalizedBotToken()}) catch return;
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.curlPost(self.allocator, url, body_list.items, &.{auth_header}) catch return;
+        const resp = root.http_util.httpPost(self.allocator, url, body_list.items, &.{auth_header}) catch return;
         self.allocator.free(resp);
     }
 

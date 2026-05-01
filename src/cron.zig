@@ -1732,7 +1732,7 @@ pub fn requestGatewayGet(allocator: std.mem.Allocator, path: []const u8) Gateway
     defer allocator.free(url);
 
     const headers: []const []const u8 = if (auth_hdr) |h| &.{h} else &.{};
-    const resp = http_util.curlGetWithStatusAndTimeout(allocator, url, headers, "5") catch return .unavailable;
+    const resp = http_util.httpGetWithStatusAndTimeout(allocator, url, headers, "5") catch return .unavailable;
     if (resp.status_code == 0) {
         allocator.free(resp.body);
         return .unavailable;
@@ -1758,7 +1758,7 @@ pub fn requestGatewayPost(allocator: std.mem.Allocator, path: []const u8, json_b
     // Match gateway GET behavior: if the live gateway accepts the TCP connection
     // but never responds, cron CLI should fall back to local cron.json instead of
     // hanging the caller indefinitely.
-    const resp = http_util.curlPostWithStatusAndTimeout(allocator, url, json_body, headers, "2") catch return .unavailable;
+    const resp = http_util.httpPostWithStatusAndTimeout(allocator, url, json_body, headers, "2") catch return .unavailable;
     if (resp.status_code == 0) {
         allocator.free(resp.body);
         return .unavailable;

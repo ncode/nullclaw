@@ -72,15 +72,16 @@ pub const WebFetchTool = struct {
         // Non-allowlisted hosts require global address validation.
         //
         // Security trade-off for allowlisted hosts:
-        // - resolveConnectHost normally pins DNS results to curl via --resolve,
-        //   preventing DNS rebinding attacks between resolution and connection.
-        // - For allowlisted hosts, we skip this and let curl resolve the hostname.
+        // - resolveConnectHost normally pins DNS results into the native
+        //   connection target, preventing DNS rebinding after validation.
+        // - For allowlisted hosts, we skip this and let the HTTP client resolve
+        //   the hostname.
         //   This is acceptable because the operator explicitly trusts these domains
         //   (e.g., internal services like searxng on private IPs).
         // - DNS rebinding protection is intentionally traded for operational flexibility.
         const connect_host: []const u8 = if (is_allowlisted)
             // Allowlisted: trust the operator, skip SSRF check and DNS pinning.
-            // curl will resolve the hostname itself (no --resolve pinning).
+            // The HTTP client will resolve the hostname itself.
             try allocator.dupe(u8, host)
         else
             // No allowlist configured: enforce SSRF for all external hosts.
@@ -97,18 +98,18 @@ pub const WebFetchTool = struct {
             return ToolResult.fail("Network disabled in tests");
         }
 
-        // Fetch URL via curl subprocess
+        // Fetch URL through the shared native HTTP helper.
         const headers = [_][]const u8{
             "User-Agent: nullclaw/0.1 (web_fetch tool)",
             "Accept: text/html,application/json,text/plain,*/*",
         };
 
         const body = blk: {
-            const use_dns_pinning = shouldUseCurlResolve(host) and !std.mem.eql(u8, host, connect_host);
+            const use_dns_pinning = shouldUsePinnedResolve(host) and !std.mem.eql(u8, host, connect_host);
             if (use_dns_pinning) {
-                const resolve_entry = try buildCurlResolveEntry(allocator, host, resolved_port, connect_host);
+                const resolve_entry = try buildPinnedResolveEntry(allocator, host, resolved_port, connect_host);
                 defer allocator.free(resolve_entry);
-                break :blk http_util.curlGetWithResolve(
+                break :blk http_util.httpGetWithResolve(
                     allocator,
                     url,
                     &headers,
@@ -116,7 +117,7 @@ pub const WebFetchTool = struct {
                     resolve_entry,
                 );
             }
-            break :blk http_util.curlGet(
+            break :blk http_util.httpGet(
                 allocator,
                 url,
                 &headers,
@@ -126,7 +127,7 @@ pub const WebFetchTool = struct {
             if (!builtin.is_test) {
                 log.err("web_fetch connection failed for {s}: {}", .{ url, err });
             }
-            if (err == error.CurlInterrupted) {
+            if (err == error.HttpInterrupted) {
                 return ToolResult.fail("Interrupted by /stop");
             }
             const msg = try std.fmt.allocPrint(allocator, "Fetch failed: {}", .{err});
@@ -165,13 +166,13 @@ fn parseMaxCharsWithDefault(args: JsonObjectMap, default: usize) usize {
     return @intCast(val_i64);
 }
 
-fn shouldUseCurlResolve(host: []const u8) bool {
+fn shouldUsePinnedResolve(host: []const u8) bool {
     // DNS pinning is required for hostname-based URLs. IPv6 literals do not
-    // involve DNS and don't fit curl's host:port `--resolve` syntax cleanly.
+    // involve DNS and don't fit the host:port:address pinning syntax cleanly.
     return std.mem.indexOfScalar(u8, net_security.stripHostBrackets(host), ':') == null;
 }
 
-fn buildCurlResolveEntry(
+fn buildPinnedResolveEntry(
     allocator: std.mem.Allocator,
     host: []const u8,
     port: u16,
@@ -569,21 +570,21 @@ test "WebFetchTool non-allowlisted local host still blocked" {
     try testing.expect(std.mem.indexOf(u8, result.error_msg.?, "allowed_domains") != null);
 }
 
-test "buildCurlResolveEntry formats ipv4 connect target" {
-    const entry = try buildCurlResolveEntry(testing.allocator, "example.com", 443, "93.184.216.34");
+test "buildPinnedResolveEntry formats ipv4 connect target" {
+    const entry = try buildPinnedResolveEntry(testing.allocator, "example.com", 443, "93.184.216.34");
     defer testing.allocator.free(entry);
     try testing.expectEqualStrings("example.com:443:93.184.216.34", entry);
 }
 
-test "buildCurlResolveEntry wraps ipv6 connect target" {
-    const entry = try buildCurlResolveEntry(testing.allocator, "example.com", 443, "2001:db8::1");
+test "buildPinnedResolveEntry wraps ipv6 connect target" {
+    const entry = try buildPinnedResolveEntry(testing.allocator, "example.com", 443, "2001:db8::1");
     defer testing.allocator.free(entry);
     try testing.expectEqualStrings("example.com:443:[2001:db8::1]", entry);
 }
 
-test "shouldUseCurlResolve skips ipv6 literal hosts" {
-    try testing.expect(shouldUseCurlResolve("example.com"));
-    try testing.expect(!shouldUseCurlResolve("[2001:db8::1]"));
+test "shouldUsePinnedResolve skips ipv6 literal hosts" {
+    try testing.expect(shouldUsePinnedResolve("example.com"));
+    try testing.expect(!shouldUsePinnedResolve("[2001:db8::1]"));
 }
 
 test "htmlToText strips script and style" {

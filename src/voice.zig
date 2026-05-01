@@ -126,8 +126,9 @@ pub fn transcribeFile(
         return error.ApiRequestFailed;
     const auth_hdr = auth_writer.buffered();
 
-    // POST via curl using --data-binary @tempfile
-    const resp = curlPostFromFile(
+    // POST the multipart body from disk to avoid holding audio and request
+    // body buffers in memory at the same time.
+    const resp = postBodyFromFile(
         allocator,
         endpoint,
         tmp_path,
@@ -256,68 +257,28 @@ fn parseTranscriptionText(allocator: std.mem.Allocator, json_resp: []const u8) !
     return try allocator.dupe(u8, text_val.string);
 }
 
-/// HTTP POST via curl subprocess, reading body from a file on disk.
+/// HTTP POST reading body from a file on disk.
 /// Used for multipart/form-data where body has already been written to a temp file.
-fn curlPostFromFile(
+fn postBodyFromFile(
     allocator: std.mem.Allocator,
     url: []const u8,
     file_path: [:0]const u8,
     headers: []const []const u8,
 ) ![]u8 {
-    // Build data-binary arg: @/path/to/file
-    var data_arg_buf: [300]u8 = undefined;
-    var data_writer: std.Io.Writer = .fixed(&data_arg_buf);
-    try data_writer.print("@{s}", .{file_path});
-    const data_arg = data_writer.buffered();
+    var native_headers: std.ArrayListUnmanaged(std.http.Header) = .empty;
+    defer native_headers.deinit(allocator);
+    try http_util.appendHeaderLines(&native_headers, allocator, headers);
 
-    var argv_buf: [32][]const u8 = undefined;
-    var argc: usize = 0;
-
-    argv_buf[argc] = "curl";
-    argc += 1;
-    argv_buf[argc] = "-s";
-    argc += 1;
-    argv_buf[argc] = "-X";
-    argc += 1;
-    argv_buf[argc] = "POST";
-    argc += 1;
-
-    for (headers) |hdr| {
-        if (argc + 2 > argv_buf.len) break;
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = hdr;
-        argc += 1;
-    }
-
-    argv_buf[argc] = "--data-binary";
-    argc += 1;
-    argv_buf[argc] = data_arg;
-    argc += 1;
-    argv_buf[argc] = url;
-    argc += 1;
-
-    var child = std_compat.process.Child.init(argv_buf[0..argc], allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch return error.CurlReadError;
-
-    const term = child.wait() catch return error.CurlWaitError;
-    switch (term) {
-        .exited => |code| if (code != 0) {
-            allocator.free(stdout);
-            return error.CurlFailed;
-        },
-        else => {
-            allocator.free(stdout);
-            return error.CurlFailed;
-        },
-    }
-
-    return stdout;
+    const response = try http_util.nativeHttpRequest(allocator, .{
+        .method = .POST,
+        .url = url,
+        .payload_file_path = file_path,
+        .headers = native_headers.items,
+        .max_response_bytes = 4 * 1024 * 1024,
+        .fail_on_http_error = false,
+    });
+    defer if (response.headers.len > 0) allocator.free(response.headers);
+    return response.body;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -376,7 +337,7 @@ fn getFilePath(allocator: std.mem.Allocator, bot_token: []const u8, file_id: []c
     try json_util.appendJsonString(&body_list, allocator, file_id);
     try body_list.appendSlice(allocator, "}");
 
-    const resp = try http_util.curlPost(allocator, url, body_list.items, &.{});
+    const resp = try http_util.httpPost(allocator, url, body_list.items, &.{});
     defer allocator.free(resp);
 
     // Parse response
@@ -397,7 +358,7 @@ fn downloadTelegramFile(allocator: std.mem.Allocator, bot_token: []const u8, tg_
     try url_writer.print("https://api.telegram.org/file/bot{s}/{s}", .{ bot_token, tg_file_path });
     const url = url_writer.buffered();
 
-    const data = try http_util.curlGet(allocator, url, &.{}, "30");
+    const data = try http_util.httpGet(allocator, url, &.{}, "30");
     defer allocator.free(data);
 
     // Save to temp file (platform-aware temp dir)
@@ -545,6 +506,71 @@ test "voice transcribeFile returns error for nonexistent file" {
     const allocator = std.testing.allocator;
     const result = transcribeFile(allocator, "fake_key", "https://api.groq.com/openai/v1/audio/transcriptions", "/nonexistent/path/audio.ogg", .{});
     try std.testing.expectError(error.FileReadFailed, result);
+}
+
+test "voice transcribeFile native migration posts multipart file body" {
+    const allocator = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const audio_name = "voice.ogg";
+    {
+        var audio = try std_compat.fs.Dir.wrap(tmp_dir.dir).createFile(audio_name, .{});
+        defer audio.close();
+        try audio.writeAll("voice-bytes");
+    }
+    const audio_path = try std_compat.fs.Dir.wrap(tmp_dir.dir).realpathAlloc(allocator, audio_name);
+    defer allocator.free(audio_path);
+
+    const handler = struct {
+        fn handle(alloc: std.mem.Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.POST, request.method);
+            try std.testing.expectEqualStrings("https://api.example.test/audio/transcriptions", request.url);
+            try std.testing.expect(request.payload == null);
+            try std.testing.expect(request.payload_file_path != null);
+
+            var saw_auth = false;
+            var saw_content_type = false;
+            for (request.headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                    saw_auth = true;
+                    try std.testing.expectEqualStrings("Bearer test-key", header.value);
+                }
+                if (std.ascii.eqlIgnoreCase(header.name, "Content-Type")) {
+                    saw_content_type = true;
+                    try std.testing.expect(std.mem.startsWith(u8, header.value, "multipart/form-data; boundary="));
+                }
+            }
+            try std.testing.expect(saw_auth);
+            try std.testing.expect(saw_content_type);
+
+            const body_file = try std_compat.fs.openFileAbsolute(request.payload_file_path.?, .{});
+            defer body_file.close();
+            const body = try body_file.readToEndAlloc(alloc, 64 * 1024);
+            defer alloc.free(body);
+            try std.testing.expect(std.mem.indexOf(u8, body, "voice-bytes") != null);
+            try std.testing.expect(std.mem.indexOf(u8, body, "whisper-large-v3") != null);
+            try std.testing.expect(std.mem.indexOf(u8, body, "name=\"language\"") != null);
+            try std.testing.expect(std.mem.indexOf(u8, body, "en") != null);
+
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "{\"text\":\"hello\"}") };
+        }
+    }.handle;
+
+    http_util.setTestNativeHttpHandler(handler);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    const text = try transcribeFile(
+        allocator,
+        "test-key",
+        "https://api.example.test/audio/transcriptions",
+        audio_path,
+        .{ .language = "en" },
+    );
+    defer allocator.free(text);
+
+    try std.testing.expectEqualStrings("hello", text);
 }
 
 test "voice transcribeTelegramVoice returns null without transcriber" {

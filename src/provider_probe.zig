@@ -138,7 +138,7 @@ fn classifyProbeError(err: anyerror) struct { reason: []const u8, status_code: ?
     if (containsIgnoreCase(name, "Timeout") or
         containsIgnoreCase(name, "Network") or
         containsIgnoreCase(name, "Connection") or
-        containsIgnoreCase(name, "Curl"))
+        containsIgnoreCase(name, "Http"))
     {
         return .{ .reason = "network_error", .status_code = null };
     }

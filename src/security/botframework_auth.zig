@@ -132,7 +132,7 @@ pub const KeyCache = struct {
     }
 
     fn refreshLocked(self: *KeyCache, allocator: Allocator, now_sec: i64) VerifyError!void {
-        const openid = http_util.curlGetMaxBytes(allocator, OPENID_CONFIG_URL, &.{}, FETCH_TIMEOUT_SECS, MAX_OPENID_BYTES) catch {
+        const openid = http_util.httpGetMaxBytes(allocator, OPENID_CONFIG_URL, &.{}, FETCH_TIMEOUT_SECS, MAX_OPENID_BYTES) catch {
             return error.OpenIdMetadataFetchFailed;
         };
         defer allocator.free(openid);
@@ -140,7 +140,7 @@ pub const KeyCache = struct {
         const metadata = try parseOpenIdMetadata(allocator, openid);
         defer metadata.deinit(allocator);
 
-        const raw_keys = http_util.curlGetMaxBytes(allocator, metadata.jwks_uri, &.{}, FETCH_TIMEOUT_SECS, MAX_KEYS_BYTES) catch {
+        const raw_keys = http_util.httpGetMaxBytes(allocator, metadata.jwks_uri, &.{}, FETCH_TIMEOUT_SECS, MAX_KEYS_BYTES) catch {
             return error.OpenIdKeysFetchFailed;
         };
         defer allocator.free(raw_keys);

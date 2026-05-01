@@ -642,7 +642,7 @@ fn modelsCacheProviderKey(allocator: std.mem.Allocator, provider: []const u8, ap
 fn fetchModelsFromModelsDev(allocator: std.mem.Allocator, provider: []const u8) !?[][]const u8 {
     const provider_key = modelsDevProviderKey(provider) orelse return null;
 
-    const response = http_util.curlGet(allocator, MODELS_DEV_URL, &.{}, "10") catch |err| {
+    const response = http_util.httpGet(allocator, MODELS_DEV_URL, &.{}, "10") catch |err| {
         logModelCatalogFailureErr(MODELS_DEV_URL, provider, err);
         return error.FetchFailed;
     };
@@ -733,7 +733,7 @@ fn jsonStringArrayContains(value: std.json.Value, needle: []const u8) bool {
 }
 
 fn fetchAndParseModels(allocator: std.mem.Allocator, provider: []const u8, url: []const u8, headers: []const []const u8, prefix_filter: ?[]const u8) ![][]const u8 {
-    const response = http_util.curlGet(allocator, url, headers, "10") catch |err| {
+    const response = http_util.httpGet(allocator, url, headers, "10") catch |err| {
         logModelCatalogFailureErr(url, provider, err);
         return error.FetchFailed;
     };
@@ -2569,7 +2569,7 @@ fn buildModelsRefreshFetchOptions() ModelsRefreshFetchOptions {
 
 fn fetchModelsRefreshCatalog(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     const options = buildModelsRefreshFetchOptions();
-    return http_util.curlGetMaxBytes(allocator, url, &.{}, options.timeout_secs, options.max_output_bytes);
+    return http_util.httpGetMaxBytes(allocator, url, &.{}, options.timeout_secs, options.max_output_bytes);
 }
 
 /// Refresh the model catalog by fetching available models from known providers.
@@ -2602,7 +2602,7 @@ pub fn runModelsRefresh(allocator: std.mem.Allocator) !void {
         },
     };
 
-    // Collect models from each provider using curl
+    // Collect models from each provider using the shared HTTP helper.
     var total_models: usize = 0;
     var results_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer results_buf.deinit(allocator);
@@ -2613,10 +2613,10 @@ pub fn runModelsRefresh(allocator: std.mem.Allocator) !void {
         try out.print("  Fetching from {s}...\n", .{cp.name});
         try out.flush();
 
-        // Run curl to fetch models list through the shared HTTP helper so the
-        // response size cap stays explicit without duplicating subprocess logic.
+        // Fetch models through the shared HTTP helper so the response size cap
+        // stays explicit.
         const response_body = fetchModelsRefreshCatalog(allocator, cp.url) catch {
-            try out.print("  [SKIP] {s}: curl failed\n", .{cp.name});
+            try out.print("  [SKIP] {s}: HTTP request failed\n", .{cp.name});
             try out.flush();
             continue;
         };

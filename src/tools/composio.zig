@@ -1,9 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const appendJsonEscaped = @import("../util.zig").appendJsonEscaped;
 const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
+const http_util = @import("../http_util.zig");
 
 const COMPOSIO_API_BASE_V2 = "https://backend.composio.dev/api/v2";
 const COMPOSIO_API_BASE_V3 = "https://backend.composio.dev/api/v3";
@@ -223,36 +225,10 @@ pub const ComposioTool = struct {
         const body = try v2_body_buf.toOwnedSlice(allocator);
         defer allocator.free(body);
 
-        var argv_buf: [20][]const u8 = undefined;
-        var argc: usize = 0;
-        argv_buf[argc] = "curl";
-        argc += 1;
-        argv_buf[argc] = "-sL";
-        argc += 1;
-        argv_buf[argc] = "-m";
-        argc += 1;
-        argv_buf[argc] = "15";
-        argc += 1;
-        argv_buf[argc] = "-X";
-        argc += 1;
-        argv_buf[argc] = "POST";
-        argc += 1;
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = auth_header;
-        argc += 1;
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = "Content-Type: application/json";
-        argc += 1;
-        argv_buf[argc] = "-d";
-        argc += 1;
-        argv_buf[argc] = body;
-        argc += 1;
-        argv_buf[argc] = "https://backend.composio.dev/api/v1/connectedAccounts";
-        argc += 1;
-
-        return self.runCurl(allocator, argv_buf[0..argc]);
+        return self.runHttp(allocator, .POST, "https://backend.composio.dev/api/v1/connectedAccounts", body, &.{
+            auth_header,
+            "Content-Type: application/json",
+        });
     }
 
     // ── HTTP helpers ───────────────────────────────────────────────
@@ -261,78 +237,57 @@ pub const ComposioTool = struct {
         const auth_header = try std.fmt.allocPrint(allocator, "x-api-key: {s}", .{self.api_key});
         defer allocator.free(auth_header);
 
-        var argv_buf: [20][]const u8 = undefined;
-        var argc: usize = 0;
-        argv_buf[argc] = "curl";
-        argc += 1;
-        argv_buf[argc] = "-sL";
-        argc += 1;
-        argv_buf[argc] = "-m";
-        argc += 1;
-        argv_buf[argc] = "15";
-        argc += 1;
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = auth_header;
-        argc += 1;
-        argv_buf[argc] = url;
-        argc += 1;
-
-        return self.runCurl(allocator, argv_buf[0..argc]);
+        return self.runHttp(allocator, .GET, url, null, &.{auth_header});
     }
 
     fn httpPost(self: *ComposioTool, allocator: std.mem.Allocator, url: []const u8, body: []const u8) !ToolResult {
         const auth_header = try std.fmt.allocPrint(allocator, "x-api-key: {s}", .{self.api_key});
         defer allocator.free(auth_header);
 
-        var argv_buf: [20][]const u8 = undefined;
-        var argc: usize = 0;
-        argv_buf[argc] = "curl";
-        argc += 1;
-        argv_buf[argc] = "-sL";
-        argc += 1;
-        argv_buf[argc] = "-m";
-        argc += 1;
-        argv_buf[argc] = "15";
-        argc += 1;
-        argv_buf[argc] = "-X";
-        argc += 1;
-        argv_buf[argc] = "POST";
-        argc += 1;
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = auth_header;
-        argc += 1;
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = "Content-Type: application/json";
-        argc += 1;
-        argv_buf[argc] = "-d";
-        argc += 1;
-        argv_buf[argc] = body;
-        argc += 1;
-        argv_buf[argc] = url;
-        argc += 1;
-
-        return self.runCurl(allocator, argv_buf[0..argc]);
+        return self.runHttp(allocator, .POST, url, body, &.{
+            auth_header,
+            "Content-Type: application/json",
+        });
     }
 
-    /// Run curl as a child process and return stdout on success, stderr on failure.
-    fn runCurl(_: *ComposioTool, allocator: std.mem.Allocator, argv: []const []const u8) !ToolResult {
-        const proc = @import("process_util.zig");
-        const result = try proc.run(allocator, argv, .{});
-        defer allocator.free(result.stderr);
-        if (result.success) {
-            if (result.stdout.len > 0) return ToolResult{ .success = true, .output = result.stdout };
-            allocator.free(result.stdout);
-            return ToolResult{ .success = true, .output = try allocator.dupe(u8, "(empty response)") };
+    fn runHttp(
+        _: *ComposioTool,
+        allocator: std.mem.Allocator,
+        method: std.http.Method,
+        url: []const u8,
+        body: ?[]const u8,
+        header_lines: []const []const u8,
+    ) !ToolResult {
+        if (builtin.is_test and !http_util.hasTestNativeHttpHandler()) {
+            return ToolResult{
+                .success = false,
+                .output = "",
+                .error_msg = try allocator.dupe(u8, "Network disabled in tests"),
+            };
         }
-        defer allocator.free(result.stdout);
-        if (result.exit_code != null) {
-            const err_out = try allocator.dupe(u8, if (result.stderr.len > 0) result.stderr else "curl failed with non-zero exit code");
+
+        var headers: std.ArrayListUnmanaged(std.http.Header) = .empty;
+        defer headers.deinit(allocator);
+        try http_util.appendHeaderLines(&headers, allocator, header_lines);
+
+        const response = http_util.nativeHttpRequest(allocator, .{
+            .method = method,
+            .url = url,
+            .payload = body,
+            .headers = headers.items,
+            .timeout_secs = 15,
+            .max_response_bytes = 16 * 1024 * 1024,
+            .fail_on_http_error = false,
+            .follow_redirects = true,
+        }) catch |err| {
+            const err_out = try std.fmt.allocPrint(allocator, "HTTP request failed: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = err_out };
-        }
-        return ToolResult{ .success = false, .output = "", .error_msg = "curl terminated by signal" };
+        };
+        defer if (response.headers.len > 0) allocator.free(response.headers);
+
+        if (response.body.len > 0) return ToolResult{ .success = true, .output = response.body };
+        allocator.free(response.body);
+        return ToolResult{ .success = true, .output = try allocator.dupe(u8, "(empty response)") };
     }
 };
 
@@ -485,7 +440,7 @@ test "composio no api key returns error" {
     try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "API key") != null);
 }
 
-test "composio list action invokes curl" {
+test "composio list action returns deterministic test-mode network result" {
     var ct = ComposioTool{ .api_key = "test-key", .entity_id = "default" };
     const t = ct.tool();
     const parsed = try root.parseTestArgs("{\"action\": \"list\"}");
@@ -493,12 +448,10 @@ test "composio list action invokes curl" {
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     defer if (result.output.len > 0) std.testing.allocator.free(result.output);
     defer if (result.error_msg) |e| std.testing.allocator.free(e);
-    // curl actually runs — may succeed with API error JSON or fail with network error
-    // Either way, we get a result (not a Zig error)
     try std.testing.expect(result.output.len > 0 or result.error_msg != null);
 }
 
-test "composio list with app filter invokes curl" {
+test "composio list with app filter returns deterministic test-mode network result" {
     var ct = ComposioTool{ .api_key = "test-key", .entity_id = "default" };
     const t = ct.tool();
     const parsed = try root.parseTestArgs("{\"action\": \"list\", \"app\": \"gmail\"}");
@@ -507,6 +460,36 @@ test "composio list with app filter invokes curl" {
     defer if (result.output.len > 0) std.testing.allocator.free(result.output);
     defer if (result.error_msg) |e| std.testing.allocator.free(e);
     try std.testing.expect(result.output.len > 0 or result.error_msg != null);
+}
+
+test "composio native migration sends list request headers" {
+    const allocator = std.testing.allocator;
+    const handler = struct {
+        fn handle(alloc: std.mem.Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.GET, request.method);
+            try std.testing.expectEqualStrings(COMPOSIO_API_BASE_V3 ++ "/tools?toolkits=gmail&page=1&page_size=100", request.url);
+            try std.testing.expectEqual(@as(?u64, 15), request.timeout_secs);
+            try std.testing.expect(!request.fail_on_http_error);
+            try std.testing.expect(request.follow_redirects);
+            try std.testing.expectEqual(@as(usize, 1), request.headers.len);
+            try std.testing.expectEqualStrings("x-api-key", request.headers[0].name);
+            try std.testing.expectEqualStrings("test-key", request.headers[0].value);
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "{\"items\":[]}") };
+        }
+    }.handle;
+
+    http_util.setTestNativeHttpHandler(handler);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    var ct = ComposioTool{ .api_key = "test-key", .entity_id = "default" };
+    const t = ct.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"list\", \"app\": \"gmail\"}");
+    defer parsed.deinit();
+    const result = try t.execute(allocator, parsed.value.object);
+    defer allocator.free(result.output);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("{\"items\":[]}", result.output);
 }
 
 test "composio execute missing action_name" {
@@ -519,7 +502,7 @@ test "composio execute missing action_name" {
     try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "action_name") != null);
 }
 
-test "composio execute with action_name invokes curl" {
+test "composio execute with action_name returns deterministic test-mode network result" {
     var ct = ComposioTool{ .api_key = "test-key", .entity_id = "default" };
     const t = ct.tool();
     const parsed = try root.parseTestArgs("{\"action\": \"execute\", \"action_name\": \"GMAIL_SEND\"}");
@@ -527,8 +510,36 @@ test "composio execute with action_name invokes curl" {
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     defer if (result.output.len > 0) std.testing.allocator.free(result.output);
     defer if (result.error_msg) |e| std.testing.allocator.free(e);
-    // curl runs against real API — may return error JSON or network failure
     try std.testing.expect(result.output.len > 0 or result.error_msg != null);
+}
+
+test "composio native migration sends execute body" {
+    const allocator = std.testing.allocator;
+    const handler = struct {
+        fn handle(alloc: std.mem.Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.POST, request.method);
+            try std.testing.expectEqualStrings(COMPOSIO_API_BASE_V3 ++ "/tools/gmail-send/execute", request.url);
+            try std.testing.expect(request.payload != null);
+            try std.testing.expect(std.mem.indexOf(u8, request.payload.?, "\"user_id\":\"user_a\"") != null);
+            try std.testing.expect(std.mem.indexOf(u8, request.payload.?, "\"connected_account_id\":\"acct_1\"") != null);
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "{\"ok\":true}") };
+        }
+    }.handle;
+
+    http_util.setTestNativeHttpHandler(handler);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    var ct = ComposioTool{ .api_key = "test-key", .entity_id = "default" };
+    const t = ct.tool();
+    const parsed = try root.parseTestArgs(
+        "{\"action\":\"execute\",\"tool_slug\":\"GMAIL_SEND\",\"entity_id\":\"user_a\",\"connected_account_id\":\"acct_1\",\"params\":{\"to\":\"a@example.com\"}}",
+    );
+    defer parsed.deinit();
+    const result = try t.execute(allocator, parsed.value.object);
+    defer allocator.free(result.output);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("{\"ok\":true}", result.output);
 }
 
 test "composio connect missing app" {
@@ -541,7 +552,7 @@ test "composio connect missing app" {
     try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "app") != null);
 }
 
-test "composio connect with app invokes curl" {
+test "composio connect with app returns deterministic test-mode network result" {
     var ct = ComposioTool{ .api_key = "test-key", .entity_id = "default" };
     const t = ct.tool();
     const parsed = try root.parseTestArgs("{\"action\": \"connect\", \"app\": \"gmail\"}");
@@ -549,7 +560,6 @@ test "composio connect with app invokes curl" {
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     defer if (result.output.len > 0) std.testing.allocator.free(result.output);
     defer if (result.error_msg) |e| std.testing.allocator.free(e);
-    // curl runs — result depends on network, but should not crash
     try std.testing.expect(result.output.len > 0 or result.error_msg != null);
 }
 

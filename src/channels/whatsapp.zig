@@ -213,7 +213,7 @@ pub const WhatsAppChannel = struct {
         var auth_buf: [512]u8 = undefined;
         const auth_header = std.fmt.bufPrint(&auth_buf, "Authorization: Bearer {s}", .{access_token}) catch return null;
 
-        const info_resp = root.http_util.curlGet(allocator, info_url, &.{auth_header}, "10") catch return null;
+        const info_resp = root.http_util.httpGet(allocator, info_url, &.{auth_header}, "10") catch return null;
         defer allocator.free(info_resp);
 
         var info_parsed = std.json.parseFromSlice(std.json.Value, allocator, info_resp, .{}) catch return null;
@@ -225,7 +225,7 @@ pub const WhatsAppChannel = struct {
         const media_url = url_val.string;
 
         // Step 2: Download media bytes
-        const media_resp = root.http_util.curlGet(allocator, media_url, &.{auth_header}, "30") catch return null;
+        const media_resp = root.http_util.httpGet(allocator, media_url, &.{auth_header}, "30") catch return null;
         defer allocator.free(media_resp);
 
         // Step 3: Write to tmp file

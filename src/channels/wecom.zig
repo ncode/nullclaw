@@ -40,7 +40,7 @@ pub const WeComChannel = struct {
         defer payload.deinit(self.allocator);
         try appendTextPayload(self.allocator, &payload, text);
 
-        const resp = root.http_util.curlPost(self.allocator, webhook_url, payload.items, &.{}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, webhook_url, payload.items, &.{}) catch |err| {
             log.err("wecom send failed: {}", .{err});
             return error.WeComApiError;
         };
@@ -64,7 +64,7 @@ pub const WeComChannel = struct {
         defer payload.deinit(self.allocator);
         try appendMarkdownPayload(self.allocator, &payload, markdown);
 
-        const resp = root.http_util.curlPost(self.allocator, webhook_url, payload.items, &.{}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, webhook_url, payload.items, &.{}) catch |err| {
             log.err("wecom markdown send failed: {}", .{err});
             return error.WeComApiError;
         };

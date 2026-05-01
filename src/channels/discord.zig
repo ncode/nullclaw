@@ -298,7 +298,7 @@ pub const DiscordChannel = struct {
         auth_writer.print("Authorization: Bot {s}", .{self.token}) catch return;
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.curlPost(self.allocator, url, "{}", &.{auth_header}) catch return;
+        const resp = root.http_util.httpPost(self.allocator, url, "{}", &.{auth_header}) catch return;
         self.allocator.free(resp);
     }
 
@@ -390,13 +390,13 @@ pub const DiscordChannel = struct {
         try root.json_util.appendJsonString(&body_list, self.allocator, text);
         try body_list.appendSlice(self.allocator, "}");
 
-        // Build auth header value: "Authorization: Bot <token>"
+        // Build auth header line for http_util.httpPost.
         var auth_buf: [512]u8 = undefined;
         var auth_writer: std.Io.Writer = .fixed(&auth_buf);
         try auth_writer.print("Authorization: Bot {s}", .{self.token});
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.curlPost(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
             log.err("Discord API POST failed: {}", .{err});
             return error.DiscordApiError;
         };
@@ -404,69 +404,23 @@ pub const DiscordChannel = struct {
     }
 
     fn sendJsonMethod(self: *DiscordChannel, method: []const u8, url: []const u8, body: []const u8) !void {
-        var argv_buf: [16][]const u8 = undefined;
-        var argc: usize = 0;
-        argv_buf[argc] = "curl";
-        argc += 1;
-        argv_buf[argc] = "-s";
-        argc += 1;
-        argv_buf[argc] = "-X";
-        argc += 1;
-        argv_buf[argc] = method;
-        argc += 1;
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = "Content-Type: application/json";
-        argc += 1;
-
         var auth_buf: [512]u8 = undefined;
         var auth_writer: std.Io.Writer = .fixed(&auth_buf);
-        try auth_writer.print("Authorization: Bot {s}", .{self.token});
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = auth_writer.buffered();
-        argc += 1;
-        argv_buf[argc] = "--data-binary";
-        argc += 1;
-        argv_buf[argc] = "@-";
-        argc += 1;
-        argv_buf[argc] = url;
-        argc += 1;
+        try auth_writer.print("Bot {s}", .{self.token});
+        const http_method = std.meta.stringToEnum(std.http.Method, method) orelse return error.DiscordApiError;
 
-        var child = std_compat.process.Child.init(argv_buf[0..argc], self.allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-        try child.spawn();
-
-        if (child.stdin) |stdin_file| {
-            stdin_file.writeAll(body) catch {
-                stdin_file.close();
-                child.stdin = null;
-                _ = child.kill() catch {};
-                _ = child.wait() catch {};
-                return error.CurlWriteError;
-            };
-            stdin_file.close();
-            child.stdin = null;
-        } else {
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            return error.CurlWriteError;
-        }
-
-        const stdout = child.stdout.?.readToEndAlloc(self.allocator, 64 * 1024) catch {
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            return error.CurlReadError;
-        };
-        defer self.allocator.free(stdout);
-
-        const term = child.wait() catch return error.CurlWaitError;
-        switch (term) {
-            .exited => |code| if (code != 0) return error.DiscordApiError,
-            else => return error.DiscordApiError,
-        }
+        const response = root.http_util.nativeHttpRequest(self.allocator, .{
+            .method = http_method,
+            .url = url,
+            .payload = body,
+            .headers = &.{
+                .{ .name = "Content-Type", .value = "application/json" },
+                .{ .name = "Authorization", .value = auth_writer.buffered() },
+            },
+            .max_response_bytes = 64 * 1024,
+            .fail_on_http_error = false,
+        }) catch return error.DiscordApiError;
+        response.deinit(self.allocator);
     }
 
     fn nextInteractionToken(self: *DiscordChannel) ![]u8 {
@@ -677,7 +631,7 @@ pub const DiscordChannel = struct {
         try auth_writer.print("Authorization: Bot {s}", .{self.token});
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.curlPost(self.allocator, url, body.items, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, url, body.items, &.{auth_header}) catch |err| {
             log.err("Discord API rich POST failed: {}", .{err});
             return error.DiscordApiError;
         };
@@ -732,7 +686,7 @@ pub const DiscordChannel = struct {
         const owned_body = body catch return;
         defer self.allocator.free(owned_body);
 
-        const resp = root.http_util.curlPost(self.allocator, url, owned_body, &.{}) catch return;
+        const resp = root.http_util.httpPost(self.allocator, url, owned_body, &.{}) catch return;
         self.allocator.free(resp);
     }
 
@@ -1276,7 +1230,7 @@ pub const DiscordChannel = struct {
                                 const attach_url = url_val.string;
 
                                 // Download it
-                                if (root.http_util.curlGet(self.allocator, attach_url, &.{}, "30")) |img_data| {
+                                if (root.http_util.httpGet(self.allocator, attach_url, &.{}, "30")) |img_data| {
                                     defer self.allocator.free(img_data);
 
                                     // Make temp file
@@ -1636,6 +1590,81 @@ test "discord init stores fields" {
     try std.testing.expectEqualStrings("my-bot-token", ch.token);
     try std.testing.expectEqualStrings("guild-123", ch.guild_id.?);
     try std.testing.expect(ch.allow_bots);
+}
+
+test "discord sendJsonMethod native migration posts method headers and body" {
+    const allocator = std.testing.allocator;
+    const State = struct {
+        var called = false;
+
+        fn handle(alloc: std.mem.Allocator, request: root.http_util.NativeHttpRequest) anyerror!root.http_util.NativeHttpResponse {
+            called = true;
+            try std.testing.expectEqual(std.http.Method.PATCH, request.method);
+            try std.testing.expectEqualStrings("https://discord.example.test/interactions/1", request.url);
+            try std.testing.expectEqualStrings("{\"content\":\"ok\"}", request.payload.?);
+            var saw_auth = false;
+            var saw_content_type = false;
+            for (request.headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                    saw_auth = true;
+                    try std.testing.expectEqualStrings("Bot test-token", header.value);
+                }
+                if (std.ascii.eqlIgnoreCase(header.name, "Content-Type")) {
+                    saw_content_type = true;
+                    try std.testing.expectEqualStrings("application/json", header.value);
+                }
+            }
+            try std.testing.expect(saw_auth);
+            try std.testing.expect(saw_content_type);
+            return .{ .status_code = 204, .body = try alloc.dupe(u8, "") };
+        }
+    };
+    State.called = false;
+
+    root.http_util.setTestNativeHttpHandler(State.handle);
+    defer root.http_util.setTestNativeHttpHandler(null);
+
+    var ch = DiscordChannel.init(allocator, "test-token", null, true);
+    try ch.sendJsonMethod("PATCH", "https://discord.example.test/interactions/1", "{\"content\":\"ok\"}");
+    try std.testing.expect(State.called);
+}
+
+test "discord sendChunk native migration preserves auth header line" {
+    const allocator = std.testing.allocator;
+    const State = struct {
+        var called = false;
+
+        fn handle(alloc: std.mem.Allocator, request: root.http_util.NativeHttpRequest) anyerror!root.http_util.NativeHttpResponse {
+            called = true;
+            try std.testing.expectEqual(std.http.Method.POST, request.method);
+            try std.testing.expectEqualStrings("https://discord.com/api/v10/channels/channel_1/messages", request.url);
+            try std.testing.expect(std.mem.indexOf(u8, request.payload.?, "\"content\":\"hello\"") != null);
+
+            var saw_auth = false;
+            var saw_content_type = false;
+            for (request.headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                    saw_auth = true;
+                    try std.testing.expectEqualStrings("Bot test-token", header.value);
+                }
+                if (std.ascii.eqlIgnoreCase(header.name, "Content-Type")) {
+                    saw_content_type = true;
+                    try std.testing.expectEqualStrings("application/json", header.value);
+                }
+            }
+            try std.testing.expect(saw_auth);
+            try std.testing.expect(saw_content_type);
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "{}") };
+        }
+    };
+    State.called = false;
+
+    root.http_util.setTestNativeHttpHandler(State.handle);
+    defer root.http_util.setTestNativeHttpHandler(null);
+
+    var ch = DiscordChannel.init(allocator, "test-token", null, true);
+    try ch.sendChunk("channel_1", "hello");
+    try std.testing.expect(State.called);
 }
 
 test "discord init no guild id" {

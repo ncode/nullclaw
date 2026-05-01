@@ -109,7 +109,7 @@ fn fetchAccessToken(allocator: std.mem.Allocator, app_id: []const u8, app_secret
         .{ ACCESS_TOKEN_URL, app_id, app_secret },
     );
 
-    const resp = root.http_util.curlGet(allocator, url, &.{}, "15") catch return error.WeChatApiError;
+    const resp = root.http_util.httpGet(allocator, url, &.{}, "15") catch return error.WeChatApiError;
     defer allocator.free(resp);
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, resp, .{}) catch return error.WeChatApiError;
@@ -142,7 +142,7 @@ pub fn sendActiveTextMessage(self: *WeChatChannel, to_user: []const u8, text: []
     var send_url_buf: [512]u8 = undefined;
     const send_url = try std.fmt.bufPrint(&send_url_buf, "{s}?access_token={s}", .{ CUSTOM_SEND_URL, access_token });
 
-    const resp = root.http_util.curlPostWithStatus(self.allocator, send_url, payload.items, &.{}) catch return error.WeChatApiError;
+    const resp = root.http_util.httpPostWithStatus(self.allocator, send_url, payload.items, &.{}) catch return error.WeChatApiError;
     defer self.allocator.free(resp.body);
     if (resp.status_code < 200 or resp.status_code >= 300) return error.WeChatApiError;
 

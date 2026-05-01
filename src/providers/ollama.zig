@@ -360,7 +360,7 @@ pub const OllamaProvider = struct {
         var auth_hdr_buf: [512]u8 = undefined;
         const headers = self.buildAuthHeaders(&headers_buf, &auth_hdr_buf) catch return error.OllamaApiError;
 
-        const resp_body = root.curlPostTimed(allocator, url, body, headers, 0) catch return error.OllamaApiError;
+        const resp_body = root.httpPostTimed(allocator, url, body, headers, 0) catch return error.OllamaApiError;
         defer allocator.free(resp_body);
 
         return parseResponse(allocator, resp_body);
@@ -385,7 +385,7 @@ pub const OllamaProvider = struct {
         var auth_hdr_buf: [512]u8 = undefined;
         const headers = self.buildAuthHeaders(&headers_buf, &auth_hdr_buf) catch return error.OllamaApiError;
 
-        const resp_body = root.curlPostTimed(allocator, url, body, headers, request.timeout_secs) catch return error.OllamaApiError;
+        const resp_body = root.httpPostTimed(allocator, url, body, headers, request.timeout_secs) catch return error.OllamaApiError;
         defer allocator.free(resp_body);
 
         const text = try parseResponse(allocator, resp_body);

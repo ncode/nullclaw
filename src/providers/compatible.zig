@@ -836,7 +836,7 @@ pub const OpenAiCompatibleProvider = struct {
             header_count += 1;
         }
 
-        const resp_body = root.curlPostTimed(allocator, url, body, headers_buf[0..header_count], timeout_secs) catch return error.CompatibleApiError;
+        const resp_body = root.httpPostTimed(allocator, url, body, headers_buf[0..header_count], timeout_secs) catch return error.CompatibleApiError;
         defer allocator.free(resp_body);
 
         return parseResponsesResponse(allocator, resp_body) catch |err| {
@@ -1345,7 +1345,7 @@ pub const OpenAiCompatibleProvider = struct {
             .downstream_ctx = callback_ctx,
         };
 
-        var result = sse.curlStream(
+        var result = sse.httpStream(
             allocator,
             url,
             body,
@@ -1355,7 +1355,7 @@ pub const OpenAiCompatibleProvider = struct {
             streamThinkSanitizeCallback,
             @ptrCast(&sanitize_ctx),
         ) catch |err| {
-            if (err == error.CurlWaitError or err == error.CurlFailed) {
+            if (err == error.HttpWaitError or err == error.HttpFailed) {
                 log.warn("{s} streaming failed with {}; falling back to non-streaming response", .{ self.name, err });
                 // Cap the fallback timeout to 90 s — if streaming stalled (e.g. speed-limit
                 // triggered after 60 s of zero throughput) the non-streaming endpoint is
@@ -1475,7 +1475,7 @@ pub const OpenAiCompatibleProvider = struct {
             header_count += 1;
         }
 
-        const resp_body = root.curlPostTimed(allocator, url, body, headers_buf[0..header_count], 0) catch return error.CompatibleApiError;
+        const resp_body = root.httpPostTimed(allocator, url, body, headers_buf[0..header_count], 0) catch return error.CompatibleApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body) catch |err| {
@@ -1567,7 +1567,7 @@ pub const OpenAiCompatibleProvider = struct {
             header_count += 1;
         }
 
-        const resp_body = root.curlPostTimed(allocator, url, body, headers_buf[0..header_count], request.timeout_secs) catch return error.CompatibleApiError;
+        const resp_body = root.httpPostTimed(allocator, url, body, headers_buf[0..header_count], request.timeout_secs) catch return error.CompatibleApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body) catch |err| {

@@ -124,7 +124,7 @@ pub const FileWriteTool = struct {
             try allocator.dupe(u8, full_path);
         defer allocator.free(write_path);
 
-        const existing_mode: ?std_compat.fs.File.Mode = blk: {
+        const existing_stat: ?std_compat.fs.File.Stat = blk: {
             const st = fs_compat.statPath(write_path) catch |err| switch (err) {
                 error.FileNotFound => break :blk null,
                 else => {
@@ -132,8 +132,10 @@ pub const FileWriteTool = struct {
                     return ToolResult{ .success = false, .output = "", .error_msg = msg };
                 },
             };
-            break :blk st.mode;
+            break :blk st;
         };
+        const existing_mode: ?std_compat.fs.File.Mode = if (existing_stat) |st| st.mode else null;
+        const existing_has_multiple_links = if (existing_stat) |st| st.nlink > 1 else false;
 
         // Ensure parent directory exists after policy checks pass.
         if (std_compat.fs.path.dirname(write_path)) |parent| {
@@ -210,6 +212,19 @@ pub const FileWriteTool = struct {
             const msg = try std.fmt.allocPrint(allocator, "Failed to write file: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };
+
+        if (!existing_is_symlink and existing_has_multiple_links) {
+            // Regression: some workspace filesystems mutate the shared hardlink
+            // inode during replace-over-existing. Unlink first so the temp file
+            // is installed as a fresh inode inside the workspace.
+            parent_dir.deleteFile(basename) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => {
+                    const msg = try std.fmt.allocPrint(allocator, "Failed to unlink existing file: {}", .{err});
+                    return ToolResult{ .success = false, .output = "", .error_msg = msg };
+                },
+            };
+        }
 
         parent_dir.rename(tmp_name_buf[0..tmp_name_len], basename) catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "Failed to replace file: {}", .{err});

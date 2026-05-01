@@ -329,7 +329,7 @@ pub const QmdAdapter = struct {
             const mtime_ns: i128 = stat.mtime;
             const age_ns = now_ns - mtime_ns;
 
-            if (age_ns > retention_ns) {
+            if (self.config.sessions.retention_days == 0 or age_ns >= retention_ns) {
                 dir.deleteFile(entry.name) catch continue;
                 deleted += 1;
             }

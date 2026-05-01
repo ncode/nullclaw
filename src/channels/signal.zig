@@ -452,7 +452,7 @@ pub const SignalChannel = struct {
         const rpc_body = try body.toOwnedSlice(allocator);
         defer allocator.free(rpc_body);
 
-        const resp = root.http_util.curlPost(allocator, url, rpc_body, &.{}) catch |err| {
+        const resp = root.http_util.httpPost(allocator, url, rpc_body, &.{}) catch |err| {
             log.warn("Signal fetch attachment {s} failed: {}", .{ attachment_id, err });
             return null;
         };
@@ -776,7 +776,7 @@ pub const SignalChannel = struct {
         var url_buf: [1024]u8 = undefined;
         const url = try self.rpcUrl(&url_buf);
 
-        const resp = root.http_util.curlPost(self.allocator, url, rpc_body, &.{}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, url, rpc_body, &.{}) catch |err| {
             log.warn("Signal RPC send failed: {}", .{err});
             return err;
         };
@@ -815,7 +815,7 @@ pub const SignalChannel = struct {
         var url_buf: [1024]u8 = undefined;
         const url = try self.sendUrl(&url_buf);
 
-        const resp = root.http_util.curlPost(self.allocator, url, rest_body, &.{}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, url, rest_body, &.{}) catch |err| {
             log.warn("Signal REST send failed: {}", .{err});
             return err;
         };
@@ -859,7 +859,7 @@ pub const SignalChannel = struct {
         var url_buf: [1024]u8 = undefined;
         const url = self.rpcUrl(&url_buf) catch return;
 
-        const resp = root.http_util.curlPost(self.allocator, url, rpc_body, &.{}) catch return;
+        const resp = root.http_util.httpPost(self.allocator, url, rpc_body, &.{}) catch return;
         self.allocator.free(resp);
     }
 
@@ -945,10 +945,10 @@ pub const SignalChannel = struct {
 
         var url_buf: [1024]u8 = undefined;
         const url = self.healthUrl(&url_buf) catch return false;
-        const resp = root.http_util.curlGet(self.allocator, url, &.{}, "10") catch return false;
+        const resp = root.http_util.httpGet(self.allocator, url, &.{}, "10") catch return false;
         defer self.allocator.free(resp);
         // signal-cli health endpoint returns 2xx on success.
-        // If we got here, curl succeeded (exit 0), so the endpoint is healthy.
+        // If we got here, the native HTTP request succeeded.
         return true;
     }
 
@@ -1172,7 +1172,7 @@ pub const SignalChannel = struct {
     fn pollMessagesRest(self: *SignalChannel, allocator: std.mem.Allocator) ![]root.ChannelMessage {
         var url_buf: [1200]u8 = undefined;
         const url = try self.receivePollUrl(&url_buf);
-        const resp = root.http_util.curlGet(self.allocator, url, &.{}, "10") catch |err| {
+        const resp = root.http_util.httpGet(self.allocator, url, &.{}, "10") catch |err| {
             log.warn("Signal REST receive failed: {}", .{err});
             return &.{};
         };
@@ -1329,7 +1329,7 @@ pub const SignalChannel = struct {
         // Verify connectivity by hitting the health endpoint.
         var url_buf: [1024]u8 = undefined;
         const url = try self.healthUrl(&url_buf);
-        const resp = root.http_util.curlGet(self.allocator, url, &.{}, "10") catch |err| {
+        const resp = root.http_util.httpGet(self.allocator, url, &.{}, "10") catch |err| {
             log.warn("Signal health check failed on start: {}", .{err});
             return;
         };

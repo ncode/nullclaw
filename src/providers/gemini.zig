@@ -306,7 +306,7 @@ pub fn refreshOAuthToken(allocator: std.mem.Allocator, refresh_token: []const u8
 
     const url = "https://oauth2.googleapis.com/token";
 
-    const resp_body = root.curlPostFormTimed(
+    const resp_body = root.httpPostFormTimed(
         allocator,
         url,
         body,
@@ -757,14 +757,8 @@ pub const GeminiProvider = struct {
         return try allocator.dupe(u8, text.string);
     }
 
-    /// Run curl in SSE streaming mode for Gemini and parse output line by line.
-    ///
-    /// Spawns `curl -s --no-buffer` with the strongest supported fail-fast
-    /// flag: `--fail-with-body` on curl >= 7.76.0, otherwise `-f`.
-    /// For each SSE delta, calls `callback(ctx, chunk)`.
-    /// Returns accumulated result after stream completes.
-    /// Stream ends when curl connection closes (no [DONE] sentinel).
-    pub fn curlStreamGemini(
+    /// Run a native HTTP SSE request for Gemini and parse output line by line.
+    pub fn httpStreamGemini(
         allocator: std.mem.Allocator,
         url: []const u8,
         body: []const u8,
@@ -773,94 +767,32 @@ pub const GeminiProvider = struct {
         callback: root.StreamCallback,
         ctx: *anyopaque,
     ) !root.StreamChatResult {
-        // Build argv on stack (max 36 args)
-        var argv_buf: [36][]const u8 = undefined;
-        var argc: usize = 0;
-
-        argv_buf[argc] = "curl";
-        argc += 1;
-        argv_buf[argc] = "-s";
-        argc += 1;
-        argv_buf[argc] = "--no-buffer";
-        argc += 1;
-        argv_buf[argc] = sse.curlFailFastArg(allocator);
-        argc += 1;
-
-        var timeout_buf: [32]u8 = undefined;
-        if (timeout_secs > 0) {
-            const timeout_str = std.fmt.bufPrint(&timeout_buf, "{d}", .{timeout_secs}) catch return error.GeminiApiError;
-            argv_buf[argc] = "--max-time";
-            argc += 1;
-            argv_buf[argc] = timeout_str;
-            argc += 1;
-        }
-
-        // Match the generic SSE helper: if the stream goes idle for 60 seconds,
-        // let curl fail fast instead of waiting for the full --max-time budget.
-        sse.appendCurlStallDetectionArgs(argv_buf[0..], &argc);
-
-        argv_buf[argc] = "-X";
-        argc += 1;
-        argv_buf[argc] = "POST";
-        argc += 1;
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = "Content-Type: application/json";
-        argc += 1;
-
-        // Add proxy from environment if set
         const proxy = http_util.getProxyFromEnv(allocator) catch null;
         defer if (proxy) |p| allocator.free(p);
 
-        if (proxy) |p| {
-            argv_buf[argc] = "--proxy";
-            argc += 1;
-            argv_buf[argc] = p;
-            argc += 1;
-        }
-
         const resolve_entry = try http_util.buildSafeResolveEntryForRemoteUrl(allocator, url);
         defer if (resolve_entry) |entry| allocator.free(entry);
-        http_util.appendCurlResolveArgs(argv_buf[0..], &argc, resolve_entry);
 
+        var native_headers: std.ArrayListUnmanaged(std.http.Header) = .empty;
+        defer native_headers.deinit(allocator);
+        try native_headers.append(allocator, .{ .name = "Content-Type", .value = "application/json" });
         for (headers) |hdr| {
-            argv_buf[argc] = "-H";
-            argc += 1;
-            argv_buf[argc] = hdr;
-            argc += 1;
+            try http_util.appendHeaderLines(&native_headers, allocator, &.{hdr});
         }
 
-        argv_buf[argc] = "--data-binary";
-        argc += 1;
-        argv_buf[argc] = "@-";
-        argc += 1;
-        argv_buf[argc] = url;
-        argc += 1;
+        const response = try http_util.nativeHttpRequest(allocator, .{
+            .method = .POST,
+            .url = url,
+            .payload = body,
+            .headers = native_headers.items,
+            .proxy = proxy,
+            .timeout_secs = if (timeout_secs == 0) null else timeout_secs,
+            .resolve_entry = resolve_entry,
+            .max_response_bytes = 16 * 1024 * 1024,
+            .fail_on_http_error = true,
+        });
+        defer response.deinit(allocator);
 
-        var child = std_compat.process.Child.init(argv_buf[0..argc], allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-
-        try child.spawn();
-
-        if (child.stdin) |stdin_file| {
-            stdin_file.writeAll(body) catch {
-                stdin_file.close();
-                child.stdin = null;
-                _ = child.kill() catch {};
-                _ = child.wait() catch {};
-                return error.GeminiApiError;
-            };
-            stdin_file.close();
-            child.stdin = null;
-        } else {
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            return error.GeminiApiError;
-        }
-
-        // Read stdout line by line, parse SSE events
         var accumulated: std.ArrayListUnmanaged(u8) = .empty;
         defer accumulated.deinit(allocator);
 
@@ -868,39 +800,32 @@ pub const GeminiProvider = struct {
         defer line_buf.deinit(allocator);
 
         var stream_usage = root.TokenUsage{};
-        const file = child.stdout.?;
-        var read_buf: [4096]u8 = undefined;
         var saw_done = false;
 
-        outer: while (true) {
-            const n = file.read(&read_buf) catch break;
-            if (n == 0) break;
-
-            for (read_buf[0..n]) |byte| {
-                if (byte == '\n') {
-                    if (extractGeminiUsageFromSseLine(allocator, line_buf.items) catch null) |usage| {
-                        stream_usage = usage;
-                    }
-                    const result = parseGeminiSseLine(allocator, line_buf.items) catch {
-                        line_buf.clearRetainingCapacity();
-                        continue;
-                    };
-                    line_buf.clearRetainingCapacity();
-                    switch (result) {
-                        .delta => |text| {
-                            defer allocator.free(text);
-                            try accumulated.appendSlice(allocator, text);
-                            callback(ctx, root.StreamChunk.textDelta(text));
-                        },
-                        .done => {
-                            saw_done = true;
-                            break :outer;
-                        },
-                        .skip => {},
-                    }
-                } else {
-                    try line_buf.append(allocator, byte);
+        for (response.body) |byte| {
+            if (byte == '\n') {
+                if (extractGeminiUsageFromSseLine(allocator, line_buf.items) catch null) |usage| {
+                    stream_usage = usage;
                 }
+                const result = parseGeminiSseLine(allocator, line_buf.items) catch {
+                    line_buf.clearRetainingCapacity();
+                    continue;
+                };
+                line_buf.clearRetainingCapacity();
+                switch (result) {
+                    .delta => |text| {
+                        defer allocator.free(text);
+                        try accumulated.appendSlice(allocator, text);
+                        callback(ctx, root.StreamChunk.textDelta(text));
+                    },
+                    .done => {
+                        saw_done = true;
+                        break;
+                    },
+                    .skip => {},
+                }
+            } else {
+                try line_buf.append(allocator, byte);
             }
         }
 
@@ -924,41 +849,6 @@ pub const GeminiProvider = struct {
             }
         }
 
-        // Drain remaining stdout to prevent deadlock on wait()
-        while (true) {
-            const n = file.read(&read_buf) catch break;
-            if (n == 0) break;
-        }
-
-        const term = child.wait() catch |err| {
-            log.err("curlStreamGemini child.wait failed: {}", .{err});
-            if (root.shouldRecoverPartialStream(accumulated.items.len, saw_done)) {
-                log.warn("curlStreamGemini proceeding despite wait failure after partial stream output", .{});
-                callback(ctx, root.StreamChunk.finalChunk());
-                return finalizeGeminiStreamResult(allocator, accumulated.items, stream_usage);
-            }
-            return error.CurlWaitError;
-        };
-        switch (term) {
-            .exited => |code| if (code != 0) {
-                if (root.shouldRecoverPartialStream(accumulated.items.len, saw_done)) {
-                    log.warn("curlStreamGemini exit code {d} after partial stream output; returning accumulated output", .{code});
-                    callback(ctx, root.StreamChunk.finalChunk());
-                    return finalizeGeminiStreamResult(allocator, accumulated.items, stream_usage);
-                }
-                return error.CurlFailed;
-            },
-            else => {
-                if (root.shouldRecoverPartialStream(accumulated.items.len, saw_done)) {
-                    log.warn("curlStreamGemini abnormal termination after partial stream output; returning accumulated output", .{});
-                    callback(ctx, root.StreamChunk.finalChunk());
-                    return finalizeGeminiStreamResult(allocator, accumulated.items, stream_usage);
-                }
-                return error.CurlFailed;
-            },
-        }
-
-        // Signal completion only after successful process exit.
         callback(ctx, root.StreamChunk.finalChunk());
         return finalizeGeminiStreamResult(allocator, accumulated.items, stream_usage);
     }
@@ -1000,11 +890,11 @@ pub const GeminiProvider = struct {
         defer allocator.free(body);
 
         const resp_body = if (auth.isApiKey())
-            root.curlPostTimed(allocator, url, body, &.{}, 0) catch return error.GeminiApiError
+            root.httpPostTimed(allocator, url, body, &.{}, 0) catch return error.GeminiApiError
         else blk: {
             var auth_hdr_buf: [512]u8 = undefined;
             const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{auth.credential()}) catch return error.GeminiApiError;
-            break :blk root.curlPostTimed(allocator, url, body, &.{auth_hdr}, 0) catch return error.GeminiApiError;
+            break :blk root.httpPostTimed(allocator, url, body, &.{auth_hdr}, 0) catch return error.GeminiApiError;
         };
         defer allocator.free(resp_body);
 
@@ -1028,11 +918,11 @@ pub const GeminiProvider = struct {
         defer allocator.free(body);
 
         const resp_body = if (auth.isApiKey())
-            root.curlPostTimed(allocator, url, body, &.{}, request.timeout_secs) catch return error.GeminiApiError
+            root.httpPostTimed(allocator, url, body, &.{}, request.timeout_secs) catch return error.GeminiApiError
         else blk: {
             var auth_hdr_buf: [512]u8 = undefined;
             const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{auth.credential()}) catch return error.GeminiApiError;
-            break :blk root.curlPostTimed(allocator, url, body, &.{auth_hdr}, request.timeout_secs) catch return error.GeminiApiError;
+            break :blk root.httpPostTimed(allocator, url, body, &.{auth_hdr}, request.timeout_secs) catch return error.GeminiApiError;
         };
         defer allocator.free(resp_body);
 
@@ -1088,16 +978,16 @@ pub const GeminiProvider = struct {
         defer allocator.free(body);
 
         const stream_result = if (auth.isApiKey())
-            curlStreamGemini(allocator, url, body, &.{}, request.timeout_secs, callback, callback_ctx)
+            httpStreamGemini(allocator, url, body, &.{}, request.timeout_secs, callback, callback_ctx)
         else blk: {
             var auth_hdr_buf: [512]u8 = undefined;
             const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{auth.credential()}) catch return error.GeminiApiError;
             const headers = [_][]const u8{auth_hdr};
-            break :blk curlStreamGemini(allocator, url, body, &headers, request.timeout_secs, callback, callback_ctx);
+            break :blk httpStreamGemini(allocator, url, body, &headers, request.timeout_secs, callback, callback_ctx);
         };
 
         return stream_result catch |err| {
-            if (err == error.CurlWaitError or err == error.CurlFailed) {
+            if (err == error.HttpWaitError or err == error.HttpFailed) {
                 log.warn("Gemini streaming failed with {}; falling back to non-streaming response", .{err});
                 var fallback_request = request;
                 fallback_request.timeout_secs = streamingFallbackTimeoutSecs(request.timeout_secs);
@@ -1523,6 +1413,68 @@ test "parseGeminiSseLine invalid json returns error" {
         error.InvalidSseJson,
         GeminiProvider.parseGeminiSseLine(std.testing.allocator, "data: not-json"),
     );
+}
+
+test "gemini stream native migration posts headers and parses SSE body" {
+    const allocator = std.testing.allocator;
+    const handler = struct {
+        fn handle(alloc: std.mem.Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.POST, request.method);
+            try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1beta/models/gemini:streamGenerateContent?alt=sse", request.url);
+            try std.testing.expectEqualStrings("{\"contents\":[]}", request.payload.?);
+            try std.testing.expect(request.fail_on_http_error);
+            try std.testing.expectEqual(@as(?u64, 11), request.timeout_secs);
+            try std.testing.expectEqual(@as(usize, 2), request.headers.len);
+            try std.testing.expectEqualStrings("Content-Type", request.headers[0].name);
+            try std.testing.expectEqualStrings("application/json", request.headers[0].value);
+            try std.testing.expectEqualStrings("Authorization", request.headers[1].name);
+            try std.testing.expectEqualStrings("Bearer test-token", request.headers[1].value);
+            const body =
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hel\"}]}}]}\n" ++
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"lo\"}]}}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":5,\"totalTokenCount\":8}}\n";
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, body) };
+        }
+    }.handle;
+
+    http_util.setTestNativeHttpHandler(handler);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    const Capture = struct {
+        allocator: std.mem.Allocator,
+        text: std.ArrayListUnmanaged(u8) = .empty,
+        final_seen: bool = false,
+
+        fn onChunk(ctx: *anyopaque, chunk: root.StreamChunk) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (chunk.is_final) {
+                self.final_seen = true;
+                return;
+            }
+            self.text.appendSlice(self.allocator, chunk.delta) catch {};
+        }
+    };
+
+    var capture = Capture{ .allocator = allocator };
+    defer capture.text.deinit(allocator);
+
+    const result = try GeminiProvider.httpStreamGemini(
+        allocator,
+        "http://127.0.0.1:11434/v1beta/models/gemini:streamGenerateContent?alt=sse",
+        "{\"contents\":[]}",
+        &.{"Authorization: Bearer test-token"},
+        11,
+        Capture.onChunk,
+        @ptrCast(&capture),
+    );
+    defer if (result.content) |content| allocator.free(content);
+    defer if (result.reasoning_content) |reasoning| allocator.free(reasoning);
+
+    try std.testing.expect(capture.final_seen);
+    try std.testing.expectEqualStrings("Hello", capture.text.items);
+    try std.testing.expectEqualStrings("Hello", result.content.?);
+    try std.testing.expectEqual(@as(u32, 3), result.usage.prompt_tokens);
+    try std.testing.expectEqual(@as(u32, 5), result.usage.completion_tokens);
+    try std.testing.expectEqual(@as(u32, 8), result.usage.total_tokens);
 }
 
 test "streamingFallbackTimeoutSecs caps stalled-stream fallback timeout" {

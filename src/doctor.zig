@@ -5,7 +5,7 @@
 //!   - Config semantic validation (provider, temperature, routes, channels)
 //!   - Workspace integrity (writable probe, disk space, key files)
 //!   - Daemon state with proper JSON parsing
-//!   - Environment checks (git, curl, shell, home)
+//!   - Environment checks (git, native HTTP client, shell, home)
 //!   - Sandbox, cron status, channel connectivity (nullclaw-specific)
 
 const std = @import("std");
@@ -787,13 +787,7 @@ pub fn checkEnvironment(
         try items.append(allocator, DiagItem.warn(cat, "git not found"));
     }
 
-    // curl
-    if (try checkCommandAvailable(allocator, "curl")) |ver| {
-        defer allocator.free(ver);
-        try items.append(allocator, DiagItem.ok(cat, try std.fmt.allocPrint(allocator, "curl: {s}", .{ver})));
-    } else {
-        try items.append(allocator, DiagItem.warn(cat, "curl not found"));
-    }
+    try items.append(allocator, DiagItem.ok(cat, "native HTTP client available"));
 
     // $SHELL
     if (std_compat.process.getEnvVarOwned(allocator, "SHELL")) |shell| {

@@ -24,7 +24,7 @@ pub fn execute(
         "Accept: application/json",
     };
 
-    const body = common.curlGet(allocator, url_str, &headers, timeout_str) catch |err| {
+    const body = common.httpGet(allocator, url_str, &headers, timeout_str) catch |err| {
         common.logRequestError("duckduckgo", query, err);
         return err;
     };

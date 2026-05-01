@@ -5,9 +5,9 @@
 //! Pattern follows store_qdrant.zig: std.http.Client + std.Io.Writer.Allocating.
 
 const std = @import("std");
-const std_compat = @import("compat");
 const Allocator = std.mem.Allocator;
 const appendJsonEscaped = @import("../../util.zig").appendJsonEscaped;
+const http_util = @import("../../http_util.zig");
 const root = @import("../root.zig");
 const Memory = root.Memory;
 const MemoryCategory = root.MemoryCategory;
@@ -135,92 +135,37 @@ pub const ApiMemory = struct {
         method: std.http.Method,
         payload: ?[]const u8,
     ) !HttpResponse {
-        // Use curl subprocess so `timeout_ms` is guaranteed to apply.
         const timeout_secs: u32 = @max(@as(u32, 1), (self.timeout_ms + 999) / 1000);
-        var timeout_buf: [16]u8 = undefined;
-        const timeout_secs_str = std.fmt.bufPrint(&timeout_buf, "{d}", .{timeout_secs}) catch unreachable;
 
         var auth_header: ?[]u8 = null;
         defer if (auth_header) |h| alloc.free(h);
 
-        var argv_buf: [24][]const u8 = undefined;
-        var argc: usize = 0;
-
-        argv_buf[argc] = "curl";
-        argc += 1;
-        argv_buf[argc] = "--silent";
-        argc += 1;
-        argv_buf[argc] = "--show-error";
-        argc += 1;
-        argv_buf[argc] = "--max-time";
-        argc += 1;
-        argv_buf[argc] = timeout_secs_str;
-        argc += 1;
-        argv_buf[argc] = "--request";
-        argc += 1;
-        argv_buf[argc] = @tagName(method);
-        argc += 1;
-        argv_buf[argc] = "--header";
-        argc += 1;
-        argv_buf[argc] = "Content-Type: application/json";
-        argc += 1;
+        var headers: std.ArrayListUnmanaged(std.http.Header) = .empty;
+        defer headers.deinit(alloc);
+        try headers.append(alloc, .{ .name = "Content-Type", .value = "application/json" });
 
         if (self.api_key) |key| {
             auth_header = try std.fmt.allocPrint(alloc, "Authorization: Bearer {s}", .{key});
-            argv_buf[argc] = "--header";
-            argc += 1;
-            argv_buf[argc] = auth_header.?;
-            argc += 1;
+            try http_util.appendHeaderLines(&headers, alloc, &.{auth_header.?});
         }
 
-        if (payload) |body| {
-            argv_buf[argc] = "--data";
-            argc += 1;
-            argv_buf[argc] = body;
-            argc += 1;
-        }
-
-        argv_buf[argc] = "--write-out";
-        argc += 1;
-        argv_buf[argc] = "\n%{http_code}";
-        argc += 1;
-        argv_buf[argc] = url;
-        argc += 1;
-
-        var child = std_compat.process.Child.init(argv_buf[0..argc], alloc);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-
-        child.spawn() catch return error.ApiConnectionError;
-
-        const raw_out = child.stdout.?.readToEndAlloc(alloc, 16 * 1024 * 1024) catch return error.ApiConnectionError;
-        defer alloc.free(raw_out);
-
-        const term = child.wait() catch return error.ApiConnectionError;
-        switch (term) {
-            .exited => |code| {
-                if (code != 0) {
-                    if (code == 28) return error.ApiTimeout;
-                    return error.ApiConnectionError;
-                }
-            },
+        const response = http_util.nativeHttpRequest(alloc, .{
+            .method = method,
+            .url = url,
+            .payload = payload,
+            .headers = headers.items,
+            .timeout_secs = timeout_secs,
+            .max_response_bytes = 16 * 1024 * 1024,
+            .fail_on_http_error = false,
+        }) catch |err| switch (err) {
+            error.HttpTimeout => return error.ApiTimeout,
             else => return error.ApiConnectionError,
-        }
+        };
+        defer if (response.headers.len > 0) alloc.free(response.headers);
 
-        return parseCurlOutput(alloc, raw_out);
-    }
-
-    fn parseCurlOutput(alloc: Allocator, raw_out: []const u8) !HttpResponse {
-        const sep = std.mem.lastIndexOfScalar(u8, raw_out, '\n') orelse return error.ApiInvalidResponse;
-        const code_slice = std.mem.trim(u8, raw_out[sep + 1 ..], " \r\n\t");
-        if (code_slice.len == 0) return error.ApiInvalidResponse;
-
-        const status_code = std.fmt.parseInt(u10, code_slice, 10) catch return error.ApiInvalidResponse;
-        const body = try alloc.dupe(u8, raw_out[0..sep]);
         return .{
-            .status = @enumFromInt(status_code),
-            .body = body,
+            .status = @enumFromInt(@as(u10, @intCast(response.status_code))),
+            .body = response.body,
         };
     }
 
@@ -1540,26 +1485,51 @@ test "api parse count missing field" {
     try std.testing.expectError(error.ApiInvalidResponse, result);
 }
 
-test "api parse curl output with body" {
-    const out =
-        \\{"entry":{"id":"1"}}
-        \\200
-    ;
-    const parsed = try ApiMemory.parseCurlOutput(std.testing.allocator, out);
-    defer std.testing.allocator.free(parsed.body);
-    try std.testing.expect(parsed.status == .ok);
-    try std.testing.expectEqualStrings("{\"entry\":{\"id\":\"1\"}}", parsed.body);
-}
+test "api native migration doRequest preserves status body headers and timeout" {
+    const alloc = std.testing.allocator;
+    const handler = struct {
+        fn handle(a: Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.PUT, request.method);
+            try std.testing.expectEqualStrings("https://memory.example.test/api/memories/key", request.url);
+            try std.testing.expectEqualStrings("{\"content\":\"value\"}", request.payload.?);
+            try std.testing.expectEqual(@as(?u64, 2), request.timeout_secs);
+            try std.testing.expect(!request.fail_on_http_error);
 
-test "api parse curl output with empty body" {
-    const out =
-        \\
-        \\404
-    ;
-    const parsed = try ApiMemory.parseCurlOutput(std.testing.allocator, out);
-    defer std.testing.allocator.free(parsed.body);
-    try std.testing.expect(parsed.status == .not_found);
-    try std.testing.expectEqual(@as(usize, 0), parsed.body.len);
+            var saw_content_type = false;
+            var saw_auth = false;
+            for (request.headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Content-Type")) {
+                    saw_content_type = true;
+                    try std.testing.expectEqualStrings("application/json", header.value);
+                }
+                if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                    saw_auth = true;
+                    try std.testing.expectEqualStrings("Bearer test-key", header.value);
+                }
+            }
+            try std.testing.expect(saw_content_type);
+            try std.testing.expect(saw_auth);
+
+            return .{ .status_code = 202, .body = try a.dupe(u8, "{\"accepted\":true}") };
+        }
+    }.handle;
+
+    http_util.setTestNativeHttpHandler(handler);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    var memory = try ApiMemory.init(alloc, .{
+        .url = "https://memory.example.test",
+        .namespace = "/api",
+        .api_key = "test-key",
+        .timeout_ms = 1500,
+    });
+    defer memory.deinit();
+
+    const resp = try memory.doRequest(alloc, "https://memory.example.test/api/memories/key", .PUT, "{\"content\":\"value\"}");
+    defer alloc.free(resp.body);
+
+    try std.testing.expect(resp.status == .accepted);
+    try std.testing.expectEqualStrings("{\"accepted\":true}", resp.body);
 }
 
 test "api build store payload" {

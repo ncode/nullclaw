@@ -27,7 +27,7 @@ pub fn execute(
         x_key_header,
     };
 
-    const body = common.curlGet(allocator, url_str, &headers, timeout_str) catch |err| {
+    const body = common.httpGet(allocator, url_str, &headers, timeout_str) catch |err| {
         common.logRequestError("jina", query, err);
         return err;
     };

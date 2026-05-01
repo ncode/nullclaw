@@ -178,7 +178,7 @@ pub const MatrixChannel = struct {
         defer self.allocator.free(auth_header);
 
         const headers = [_][]const u8{auth_header};
-        const resp = try root.http_util.curlPut(self.allocator, url, body_list.items, &headers);
+        const resp = try root.http_util.httpPut(self.allocator, url, body_list.items, &headers);
         defer self.allocator.free(resp);
 
         if (std.mem.indexOf(u8, resp, "\"event_id\"") == null) {
@@ -215,7 +215,7 @@ pub const MatrixChannel = struct {
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
 
-        const resp = root.http_util.curlPut(
+        const resp = root.http_util.httpPut(
             self.allocator,
             url,
             "{\"typing\":true,\"timeout\":15000}",
@@ -240,7 +240,7 @@ pub const MatrixChannel = struct {
         defer self.allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
 
-        const resp = root.http_util.curlGet(self.allocator, url, &headers, "10") catch return false;
+        const resp = root.http_util.httpGet(self.allocator, url, &headers, "10") catch return false;
         defer self.allocator.free(resp);
 
         return std.mem.indexOf(u8, resp, "\"user_id\"") != null;
@@ -398,7 +398,7 @@ pub const MatrixChannel = struct {
         defer self.allocator.free(auth_header);
 
         const headers = [_][]const u8{auth_header};
-        const resp = try root.http_util.curlPost(self.allocator, url, "{}", &headers);
+        const resp = try root.http_util.httpPost(self.allocator, url, "{}", &headers);
         defer self.allocator.free(resp);
     }
 
@@ -674,7 +674,7 @@ pub const MatrixChannel = struct {
         defer allocator.free(auth_header);
         const headers = [_][]const u8{auth_header};
 
-        const resp = root.http_util.curlGet(allocator, url, &headers, "35") catch |err| {
+        const resp = root.http_util.httpGet(allocator, url, &headers, "35") catch |err| {
             log.warn("Matrix sync failed: {}", .{err});
             return err;
         };

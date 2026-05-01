@@ -283,7 +283,7 @@ pub const AutonomyConfig = struct {
     block_high_risk_commands: bool = true,
     allowed_commands: []const []const u8 = &.{},
     /// When true, skip the single-`&` shell-operator check so that bare
-    /// `&` in URLs (e.g. `curl https://...?a=1&b=2`) is permitted.
+    /// `&` in URLs (e.g. `https://...?a=1&b=2`) is permitted.
     allow_raw_url_chars: bool = false,
     /// Additional directories (absolute paths) the agent may access beyond workspace_dir.
     /// Resolved via realpath at check time; system-critical paths are always blocked.
@@ -379,7 +379,7 @@ pub const AgentConfig = struct {
     compaction_max_source_chars: u32 = 12_000,
     /// Include emoji prefixes in `/status` output.
     status_show_emojis: bool = true,
-    /// Max seconds to wait for an LLM HTTP response (curl --max-time). 0 = no limit.
+    /// Max seconds to wait for an LLM HTTP response. 0 = no limit.
     message_timeout_secs: u64 = 600,
     /// Timezone label used for prompt date/time section.
     /// Supported values: "UTC", "UTC+HH:MM", "UTC-HH:MM".
@@ -559,7 +559,7 @@ pub const TelegramConfig = struct {
     group_policy: []const u8 = "allowlist",
     /// Use reply-to in private (1:1) chats. Groups always use reply-to.
     reply_in_private: bool = true,
-    /// Optional SOCKS5/HTTP proxy URL for all Telegram API requests (e.g. "socks5://host:port").
+    /// Optional HTTP(S) proxy URL for all Telegram API requests (e.g. "http://host:port").
     proxy: ?[]const u8 = null,
     interactive: TelegramInteractiveConfig = .{},
     /// When true, only respond to messages that @mention the bot (in groups).
@@ -1594,8 +1594,8 @@ pub const HttpRequestConfig = struct {
     max_response_size: u32 = 1_000_000,
     timeout_secs: u64 = 30,
     allowed_domains: []const []const u8 = &.{},
-    /// Optional outbound proxy URL used for provider/network curl requests.
-    /// Supported schemes: http://, https://, socks5://
+    /// Optional outbound proxy URL used for provider/network HTTP requests.
+    /// Supported schemes: http://, https://
     proxy: ?[]const u8 = null,
     /// Optional SearXNG instance URL used by web_search as a fallback when
     /// BRAVE_API_KEY is not available.
@@ -1652,8 +1652,7 @@ pub const HttpRequestConfig = struct {
 
         const uri = std.Uri.parse(trimmed) catch return false;
         const scheme_ok = std.ascii.eqlIgnoreCase(uri.scheme, "http") or
-            std.ascii.eqlIgnoreCase(uri.scheme, "https") or
-            std.ascii.eqlIgnoreCase(uri.scheme, "socks5");
+            std.ascii.eqlIgnoreCase(uri.scheme, "https");
         if (!scheme_ok) return false;
 
         const host_comp = uri.host orelse return false;
@@ -1995,7 +1994,9 @@ test "McpServerConfig header validation" {
 test "HttpRequestConfig proxy URL validation" {
     try std.testing.expect(HttpRequestConfig.isValidProxyUrl("http://127.0.0.1:8080"));
     try std.testing.expect(HttpRequestConfig.isValidProxyUrl("https://proxy.example.com:8443"));
-    try std.testing.expect(HttpRequestConfig.isValidProxyUrl("socks5://127.0.0.1:1080"));
+    // Regression: native std.http proxy support does not include SOCKS.
+    // Reject it at config validation instead of silently bypassing the proxy.
+    try std.testing.expect(!HttpRequestConfig.isValidProxyUrl("socks5://127.0.0.1:1080"));
     try std.testing.expect(HttpRequestConfig.isValidProxyUrl("http://proxy.example.com/"));
     try std.testing.expect(!HttpRequestConfig.isValidProxyUrl(""));
     try std.testing.expect(!HttpRequestConfig.isValidProxyUrl("proxy.example.com:8080"));

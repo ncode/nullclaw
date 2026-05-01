@@ -810,7 +810,7 @@ pub const LarkChannel = struct {
         try writer.print("{{\"app_id\":\"{s}\",\"app_secret\":\"{s}\"}}", .{ self.app_id, self.app_secret });
         const body = writer.buffered();
 
-        const resp = http_util.curlPostWithStatus(
+        const resp = http_util.httpPostWithStatus(
             self.allocator,
             url,
             body,
@@ -858,8 +858,8 @@ pub const LarkChannel = struct {
         const auth_header = std.fmt.bufPrint(&auth_header_buf, "Authorization: {s}", .{auth_value}) catch return error.LarkApiError;
 
         const resp = switch (request) {
-            .post => |body| http_util.curlPostWithStatus(self.allocator, url, body, &.{auth_header}),
-            .delete => curlDeleteWithStatus(self.allocator, url, &.{auth_header}),
+            .post => |body| http_util.httpPostWithStatus(self.allocator, url, body, &.{auth_header}),
+            .delete => deleteWithStatus(self.allocator, url, &.{auth_header}),
         } catch return error.LarkApiError;
         errdefer self.allocator.free(resp.body);
 
@@ -882,65 +882,27 @@ pub const LarkChannel = struct {
         defer self.allocator.free(resp_body);
     }
 
-    fn curlDeleteWithStatus(
+    fn deleteWithStatus(
         allocator: std.mem.Allocator,
         url: []const u8,
         headers: []const []const u8,
     ) !http_util.HttpResponse {
-        var argv_buf: [24][]const u8 = undefined;
-        var argc: usize = 0;
-        argv_buf[argc] = "curl";
-        argc += 1;
-        argv_buf[argc] = "-s";
-        argc += 1;
-        argv_buf[argc] = "-X";
-        argc += 1;
-        argv_buf[argc] = "DELETE";
-        argc += 1;
+        var native_headers: std.ArrayListUnmanaged(std.http.Header) = .empty;
+        defer native_headers.deinit(allocator);
+        try http_util.appendHeaderLines(&native_headers, allocator, headers);
 
-        for (headers) |header| {
-            if (argc + 2 > argv_buf.len) break;
-            argv_buf[argc] = "-H";
-            argc += 1;
-            argv_buf[argc] = header;
-            argc += 1;
-        }
-
-        argv_buf[argc] = "-w";
-        argc += 1;
-        argv_buf[argc] = "\n%{http_code}";
-        argc += 1;
-        argv_buf[argc] = url;
-        argc += 1;
-
-        var child = std_compat.process.Child.init(argv_buf[0..argc], allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-        child.spawn() catch return error.LarkApiError;
-
-        const stdout = child.stdout.?.readToEndAlloc(allocator, LARK_API_MAX_BYTES) catch {
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            return error.LarkApiError;
-        };
-        errdefer allocator.free(stdout);
-
-        const term = child.wait() catch return error.LarkApiError;
-        switch (term) {
-            .exited => |code| if (code != 0) return error.LarkApiError,
-            else => return error.LarkApiError,
-        }
-
-        const status_sep = std.mem.lastIndexOfScalar(u8, stdout, '\n') orelse return error.LarkApiError;
-        const status_raw = std.mem.trim(u8, stdout[status_sep + 1 ..], " \t\r\n");
-        if (status_raw.len != 3) return error.LarkApiError;
-        const status_code = std.fmt.parseInt(u16, status_raw, 10) catch return error.LarkApiError;
-        const body = try allocator.dupe(u8, stdout[0..status_sep]);
-        allocator.free(stdout);
+        const response = http_util.nativeHttpRequest(allocator, .{
+            .method = .DELETE,
+            .url = url,
+            .headers = native_headers.items,
+            .max_response_bytes = LARK_API_MAX_BYTES,
+            .fail_on_http_error = false,
+        }) catch return error.LarkApiError;
+        defer if (response.headers.len > 0) allocator.free(response.headers);
 
         return .{
-            .status_code = status_code,
-            .body = body,
+            .status_code = response.status_code,
+            .body = response.body,
         };
     }
 
@@ -1162,7 +1124,7 @@ pub const LarkChannel = struct {
         var auth_header_buf: [576]u8 = undefined;
         const auth_header = std.fmt.bufPrint(&auth_header_buf, "Authorization: {s}", .{auth_value}) catch return error.LarkApiError;
 
-        const resp = http_util.curlPostWithStatus(self.allocator, url_writer.buffered(), body_writer.buffered(), &.{auth_header}) catch return error.LarkApiError;
+        const resp = http_util.httpPostWithStatus(self.allocator, url_writer.buffered(), body_writer.buffered(), &.{auth_header}) catch return error.LarkApiError;
         defer self.allocator.free(resp.body);
 
         if (!statusCodeIsSuccess(resp.status_code)) return error.LarkApiError;
@@ -1208,7 +1170,7 @@ pub const LarkChannel = struct {
         var auth_header_buf: [576]u8 = undefined;
         const auth_header = std.fmt.bufPrint(&auth_header_buf, "Authorization: {s}", .{auth_value}) catch return error.LarkApiError;
 
-        const resp = http_util.curlGetWithStatus(self.allocator, url_writer.buffered(), &.{auth_header}) catch return error.LarkApiError;
+        const resp = http_util.httpGetWithStatus(self.allocator, url_writer.buffered(), &.{auth_header}) catch return error.LarkApiError;
         defer self.allocator.free(resp.body);
 
         if (!statusCodeIsSuccess(resp.status_code)) return error.LarkApiError;
@@ -1256,7 +1218,7 @@ pub const LarkChannel = struct {
         var auth_header_buf: [576]u8 = undefined;
         const auth_header = std.fmt.bufPrint(&auth_header_buf, "Authorization: {s}", .{auth_value}) catch return error.LarkApiError;
 
-        const resp = curlDeleteWithStatus(self.allocator, url_writer.buffered(), &.{auth_header}) catch return error.LarkApiError;
+        const resp = deleteWithStatus(self.allocator, url_writer.buffered(), &.{auth_header}) catch return error.LarkApiError;
         defer self.allocator.free(resp.body);
 
         if (!statusCodeIsSuccess(resp.status_code)) return error.LarkApiError;
@@ -1382,7 +1344,7 @@ pub const LarkChannel = struct {
         var body_buf: [512]u8 = undefined;
         const body = try buildWebsocketConfigBody(&body_buf, self.app_id, self.app_secret);
 
-        const resp = http_util.curlPostWithStatus(
+        const resp = http_util.httpPostWithStatus(
             self.allocator,
             url,
             body,
@@ -2552,6 +2514,33 @@ test "lark stores all fields" {
     try std.testing.expectEqualStrings("my_token", ch.verification_token);
     try std.testing.expectEqual(@as(u16, 8080), ch.port);
     try std.testing.expectEqual(@as(usize, 2), ch.allow_from.len);
+}
+
+test "lark deleteWithStatus native migration preserves status body and auth" {
+    const allocator = std.testing.allocator;
+    const handler = struct {
+        fn handle(alloc: std.mem.Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.DELETE, request.method);
+            try std.testing.expectEqualStrings("https://open.larksuite.com/open-apis/im/v1/messages/msg/reactions/r1", request.url);
+            try std.testing.expectEqual(@as(usize, 1), request.headers.len);
+            try std.testing.expectEqualStrings("Authorization", request.headers[0].name);
+            try std.testing.expectEqualStrings("Bearer tenant-token", request.headers[0].value);
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "{\"code\":0}") };
+        }
+    }.handle;
+
+    http_util.setTestNativeHttpHandler(handler);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    const resp = try LarkChannel.deleteWithStatus(
+        allocator,
+        "https://open.larksuite.com/open-apis/im/v1/messages/msg/reactions/r1",
+        &.{"Authorization: Bearer tenant-token"},
+    );
+    defer allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    try std.testing.expectEqualStrings("{\"code\":0}", resp.body);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

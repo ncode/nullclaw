@@ -1714,7 +1714,7 @@ pub const Config = struct {
             ValidationError.InsecurePlaintextSecrets => std.debug.print("Config error: secrets.encrypt=false is not allowed because it stores secrets in plaintext.\n", .{}),
             ValidationError.InvalidRetryCount => std.debug.print("Config error: provider_retries must be <= 100.\n", .{}),
             ValidationError.InvalidBackoffMs => std.debug.print("Config error: provider_backoff_ms must be <= 600000.\n", .{}),
-            ValidationError.InvalidHttpProxyUrl => std.debug.print("Config error: http_request.proxy must be a non-empty http://, https://, or socks5:// URL.\n", .{}),
+            ValidationError.InvalidHttpProxyUrl => std.debug.print("Config error: http_request.proxy must be a non-empty http:// or https:// URL.\n", .{}),
             ValidationError.InvalidApiErrorMaxChars => std.debug.print("Config error: diagnostics.api_error_max_chars must be in [200, 10000].\n", .{}),
             ValidationError.InvalidOtelEndpoint => std.debug.print("Config error: diagnostics.otel.endpoint/otel_endpoint must be an absolute https:// URL (or http:// for localhost/private or container-local collector hosts).\n", .{}),
             ValidationError.InvalidOtelHeader => std.debug.print("Config error: diagnostics.otel.headers/otel_headers must contain valid HTTP header names/values (no CR/LF).\n", .{}),
@@ -2635,7 +2635,7 @@ test "save roundtrip preserves extended config sections" {
     cfg.http_request.enabled = true;
     cfg.http_request.max_response_size = 12345;
     cfg.http_request.timeout_secs = 8;
-    cfg.http_request.proxy = "socks5://127.0.0.1:1080";
+    cfg.http_request.proxy = "http://127.0.0.1:8080";
     cfg.http_request.search_base_url = "https://searx.example.com";
     cfg.http_request.search_provider = "brave";
     cfg.http_request.search_fallback_providers = &.{ "jina", "duckduckgo" };
@@ -2731,7 +2731,7 @@ test "save roundtrip preserves extended config sections" {
     try std.testing.expect(loaded.browser.enabled);
     try std.testing.expectEqual(@as(usize, 2), loaded.browser.allowed_domains.len);
     try std.testing.expect(loaded.http_request.enabled);
-    try std.testing.expectEqualStrings("socks5://127.0.0.1:1080", loaded.http_request.proxy.?);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080", loaded.http_request.proxy.?);
     try std.testing.expectEqualStrings("https://searx.example.com", loaded.http_request.search_base_url.?);
     try std.testing.expectEqualStrings("brave", loaded.http_request.search_provider);
     try std.testing.expectEqual(@as(usize, 2), loaded.http_request.search_fallback_providers.len);
@@ -6369,7 +6369,7 @@ test "tools.media.audio disabled" {
 test "parse telegram accounts" {
     const allocator = std.testing.allocator;
     const json =
-        \\{"channels": {"telegram": {"accounts": {"main": {"bot_token": "123:ABC", "allow_from": ["user1"], "reply_in_private": false, "proxy": "socks5://host:1080", "status_reactions": true, "binding_commands_enabled": false, "topic_commands_enabled": false, "topic_map_command_enabled": false, "commands_menu_mode": "scoped", "reaction_emojis": {"accepted": "🟡", "running": "🔵", "done": "🟢", "failed": "🔴"}, "interactive": {"enabled": true, "ttl_secs": 42, "owner_only": false, "remove_on_click": false}}}}}}
+        \\{"channels": {"telegram": {"accounts": {"main": {"bot_token": "123:ABC", "allow_from": ["user1"], "reply_in_private": false, "proxy": "http://host:1080", "status_reactions": true, "binding_commands_enabled": false, "topic_commands_enabled": false, "topic_map_command_enabled": false, "commands_menu_mode": "scoped", "reaction_emojis": {"accepted": "🟡", "running": "🔵", "done": "🟢", "failed": "🔴"}, "interactive": {"enabled": true, "ttl_secs": 42, "owner_only": false, "remove_on_click": false}}}}}}
     ;
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
@@ -6380,7 +6380,7 @@ test "parse telegram accounts" {
     try std.testing.expectEqual(@as(usize, 1), tg.allow_from.len);
     try std.testing.expectEqualStrings("user1", tg.allow_from[0]);
     try std.testing.expect(!tg.reply_in_private);
-    try std.testing.expectEqualStrings("socks5://host:1080", tg.proxy.?);
+    try std.testing.expectEqualStrings("http://host:1080", tg.proxy.?);
     try std.testing.expect(tg.status_reactions);
     try std.testing.expect(!tg.binding_commands_enabled);
     try std.testing.expect(!tg.topic_commands_enabled);

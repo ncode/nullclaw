@@ -623,7 +623,7 @@ pub fn convertToolsResponses(buf: *std.ArrayListUnmanaged(u8), allocator: std.me
 
 /// HTTP POST with optional LLM timeout (seconds). 0 = no limit.
 /// Automatically reads proxy from HTTPS_PROXY, HTTP_PROXY, or ALL_PROXY environment variables.
-pub fn curlPostTimed(allocator: std.mem.Allocator, url: []const u8, body: []const u8, headers: []const []const u8, timeout_secs: u64) ![]u8 {
+pub fn httpPostTimed(allocator: std.mem.Allocator, url: []const u8, body: []const u8, headers: []const []const u8, timeout_secs: u64) ![]u8 {
     const proxy = http_util.getProxyFromEnv(allocator) catch null;
     defer if (proxy) |p| allocator.free(p);
     const resolve_entry = http_util.buildSafeResolveEntryForRemoteUrl(allocator, url) catch |err| switch (err) {
@@ -635,15 +635,15 @@ pub fn curlPostTimed(allocator: std.mem.Allocator, url: []const u8, body: []cons
     if (timeout_secs > 0) {
         var timeout_buf: [32]u8 = undefined;
         const timeout_str = std.fmt.bufPrint(&timeout_buf, "{d}", .{timeout_secs}) catch
-            return http_util.curlPostWithProxyAndResolve(allocator, url, body, headers, proxy, null, resolve_entry);
-        return http_util.curlPostWithProxyAndResolve(allocator, url, body, headers, proxy, timeout_str, resolve_entry);
+            return http_util.httpPostWithProxyAndResolve(allocator, url, body, headers, proxy, null, resolve_entry);
+        return http_util.httpPostWithProxyAndResolve(allocator, url, body, headers, proxy, timeout_str, resolve_entry);
     }
-    return http_util.curlPostWithProxyAndResolve(allocator, url, body, headers, proxy, null, resolve_entry);
+    return http_util.httpPostWithProxyAndResolve(allocator, url, body, headers, proxy, null, resolve_entry);
 }
 
 /// HTTP POST (application/x-www-form-urlencoded) with optional timeout.
 /// Automatically reads proxy from HTTPS_PROXY, HTTP_PROXY, or ALL_PROXY environment variables.
-pub fn curlPostFormTimed(allocator: std.mem.Allocator, url: []const u8, body: []const u8, timeout_secs: u64) ![]u8 {
+pub fn httpPostFormTimed(allocator: std.mem.Allocator, url: []const u8, body: []const u8, timeout_secs: u64) ![]u8 {
     const proxy = http_util.getProxyFromEnv(allocator) catch null;
     defer if (proxy) |p| allocator.free(p);
     const resolve_entry = http_util.buildSafeResolveEntryForRemoteUrl(allocator, url) catch |err| switch (err) {
@@ -655,10 +655,10 @@ pub fn curlPostFormTimed(allocator: std.mem.Allocator, url: []const u8, body: []
     if (timeout_secs > 0) {
         var timeout_buf: [32]u8 = undefined;
         const timeout_str = std.fmt.bufPrint(&timeout_buf, "{d}", .{timeout_secs}) catch
-            return http_util.curlPostFormWithProxyAndResolve(allocator, url, body, proxy, null, resolve_entry);
-        return http_util.curlPostFormWithProxyAndResolve(allocator, url, body, proxy, timeout_str, resolve_entry);
+            return http_util.httpPostFormWithProxyAndResolve(allocator, url, body, proxy, null, resolve_entry);
+        return http_util.httpPostFormWithProxyAndResolve(allocator, url, body, proxy, timeout_str, resolve_entry);
     }
-    return http_util.curlPostFormWithProxyAndResolve(allocator, url, body, proxy, null, resolve_entry);
+    return http_util.httpPostFormWithProxyAndResolve(allocator, url, body, proxy, null, resolve_entry);
 }
 
 /// Extract text content from a provider JSON response.

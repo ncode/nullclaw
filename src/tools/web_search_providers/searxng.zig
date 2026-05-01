@@ -25,7 +25,7 @@ pub fn execute(
         "User-Agent: nullclaw/0.1 (web_search)",
     };
 
-    const body = common.curlGet(allocator, url_str, &headers, timeout_str) catch |err| {
+    const body = common.httpGet(allocator, url_str, &headers, timeout_str) catch |err| {
         common.logRequestError("searxng", query, err);
         return err;
     };

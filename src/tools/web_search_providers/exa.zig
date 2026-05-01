@@ -28,7 +28,7 @@ pub fn execute(
         "Accept: application/json",
     };
 
-    const body = common.curlPostJson(allocator, endpoint, body_json, &headers, timeout_str) catch |err| {
+    const body = common.httpPostJson(allocator, endpoint, body_json, &headers, timeout_str) catch |err| {
         common.logRequestError("exa", query, err);
         return err;
     };

@@ -69,7 +69,7 @@ pub const LineChannel = struct {
         try auth_writer.print("Authorization: Bearer {s}", .{self.config.access_token});
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.curlPost(self.allocator, REPLY_URL, body, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, REPLY_URL, body, &.{auth_header}) catch |err| {
             log.err("replyMessage failed: {}", .{err});
             return error.LineApiError;
         };
@@ -96,7 +96,7 @@ pub const LineChannel = struct {
         try auth_writer.print("Authorization: Bearer {s}", .{self.config.access_token});
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.curlPost(self.allocator, PUSH_URL, body, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, PUSH_URL, body, &.{auth_header}) catch |err| {
             log.err("pushMessage failed: {}", .{err});
             return error.LineApiError;
         };

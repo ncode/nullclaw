@@ -359,7 +359,7 @@ Config: `~/.nullclaw/config.json` (created by `onboard`)
           "bot_token": "123:ABC",
           "allow_from": ["user1"],
           "reply_in_private": true,
-          "proxy": "socks5://..."
+          "proxy": "http://proxy.example:8080"
         }
       }
     },

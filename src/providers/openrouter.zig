@@ -229,7 +229,7 @@ pub const OpenRouterProvider = struct {
         const api_key = self.api_key orelse return;
         var auth_hdr_buf: [512]u8 = undefined;
         const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{api_key}) catch return;
-        const resp = curlGet(self.allocator, WARMUP_URL, auth_hdr) catch return;
+        const resp = httpGet(self.allocator, WARMUP_URL, auth_hdr) catch return;
         self.allocator.free(resp);
     }
 
@@ -334,7 +334,7 @@ pub const OpenRouterProvider = struct {
         var title_hdr_buf: [128]u8 = undefined;
         const title_hdr = std.fmt.bufPrint(&title_hdr_buf, "X-Title: {s}", .{TITLE}) catch return error.OpenRouterApiError;
 
-        const resp_body = root.curlPostTimed(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }, 0) catch return error.OpenRouterApiError;
+        const resp_body = root.httpPostTimed(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }, 0) catch return error.OpenRouterApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body);
@@ -388,7 +388,7 @@ pub const OpenRouterProvider = struct {
         var title_hdr_buf: [128]u8 = undefined;
         const title_hdr = std.fmt.bufPrint(&title_hdr_buf, "X-Title: {s}", .{TITLE}) catch return error.OpenRouterApiError;
 
-        const resp_body = root.curlPostTimed(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }, 0) catch return error.OpenRouterApiError;
+        const resp_body = root.httpPostTimed(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }, 0) catch return error.OpenRouterApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body);
@@ -416,7 +416,7 @@ pub const OpenRouterProvider = struct {
         var title_hdr_buf: [128]u8 = undefined;
         const title_hdr = std.fmt.bufPrint(&title_hdr_buf, "X-Title: {s}", .{TITLE}) catch return error.OpenRouterApiError;
 
-        const resp_body = root.curlPostTimed(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }, request.timeout_secs) catch return error.OpenRouterApiError;
+        const resp_body = root.httpPostTimed(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }, request.timeout_secs) catch return error.OpenRouterApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body);
@@ -458,7 +458,7 @@ pub const OpenRouterProvider = struct {
         var title_hdr_buf: [128]u8 = undefined;
         const title_hdr = std.fmt.bufPrint(&title_hdr_buf, "X-Title: {s}", .{TITLE}) catch return error.OpenRouterApiError;
 
-        return sse.curlStream(allocator, BASE_URL, body, auth_hdr, &.{ referer_hdr, title_hdr }, request.timeout_secs, callback, callback_ctx);
+        return sse.httpStream(allocator, BASE_URL, body, auth_hdr, &.{ referer_hdr, title_hdr }, request.timeout_secs, callback, callback_ctx);
     }
 
     fn supportsStreamingImpl(_: *anyopaque) bool {
@@ -591,8 +591,8 @@ fn appendOpenRouterRequestFields(
     }
 }
 
-/// HTTP GET via curl subprocess with auth header.
-fn curlGet(allocator: std.mem.Allocator, url: []const u8, auth_hdr: []const u8) ![]u8 {
+/// HTTP GET with auth header.
+fn httpGet(allocator: std.mem.Allocator, url: []const u8, auth_hdr: []const u8) ![]u8 {
     const resolve_entry = http_util.buildSafeResolveEntryForRemoteUrl(allocator, url) catch |err| switch (err) {
         error.InvalidUrl, error.LocalAddressBlocked, error.HostResolutionFailed => return err,
         error.OutOfMemory => return error.OutOfMemory,
@@ -600,9 +600,9 @@ fn curlGet(allocator: std.mem.Allocator, url: []const u8, auth_hdr: []const u8) 
     defer if (resolve_entry) |entry| allocator.free(entry);
 
     if (resolve_entry) |entry| {
-        return http_util.curlGetWithResolve(allocator, url, &.{auth_hdr}, "15", entry);
+        return http_util.httpGetWithResolve(allocator, url, &.{auth_hdr}, "15", entry);
     }
-    return http_util.curlGet(allocator, url, &.{auth_hdr}, "15");
+    return http_util.httpGet(allocator, url, &.{auth_hdr}, "15");
 }
 
 // ════════════════════════════════════════════════════════════════════════════

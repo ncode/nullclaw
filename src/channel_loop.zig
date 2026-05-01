@@ -171,8 +171,8 @@ fn logAgentProcessingError(
 
 fn defaultAgentErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
-        error.CurlTimeout => "Provider timed out waiting for a response. Please retry or /new for a fresh session.",
-        error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError, error.CurlDnsError, error.CurlConnectError, error.CurlTlsError => "Network error contacting provider. Check base_url, DNS, proxy, and TLS certificates, then try again.",
+        error.HttpTimeout => "Provider timed out waiting for a response. Please retry or /new for a fresh session.",
+        error.HttpFailed, error.HttpReadError, error.HttpWaitError, error.HttpWriteError, error.HttpDnsError, error.HttpConnectError, error.HttpTlsError => "Network error contacting provider. Check base_url, DNS, proxy, and TLS certificates, then try again.",
         error.ProviderDoesNotSupportVision => "The current provider does not support image input. Switch to a vision-capable provider or remove [IMAGE:] attachments.",
         error.NoResponseContent => "Model returned an empty response. Please retry or /new for a fresh session.",
         error.AllProvidersFailed => "All configured providers failed for this request. Check model/provider compatibility and credentials.",
@@ -185,7 +185,7 @@ fn compactAgentErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
         error.NoResponseContent => "Model returned an empty response. Please try again.",
-        error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError, error.CurlDnsError, error.CurlConnectError, error.CurlTimeout, error.CurlTlsError, error.AllProvidersFailed, error.OutOfMemory => defaultAgentErrorMessage(err),
+        error.HttpFailed, error.HttpReadError, error.HttpWaitError, error.HttpWriteError, error.HttpDnsError, error.HttpConnectError, error.HttpTimeout, error.HttpTlsError, error.AllProvidersFailed, error.OutOfMemory => defaultAgentErrorMessage(err),
         else => "An error occurred. Try again.",
     };
 }
@@ -2824,11 +2824,11 @@ test "telegramConversationContext keeps delivery target for callback-driven topi
 test "defaultAgentErrorMessage distinguishes timeout from generic network errors" {
     try std.testing.expectEqualStrings(
         "Provider timed out waiting for a response. Please retry or /new for a fresh session.",
-        defaultAgentErrorMessage(error.CurlTimeout),
+        defaultAgentErrorMessage(error.HttpTimeout),
     );
     try std.testing.expectEqualStrings(
         "Network error contacting provider. Check base_url, DNS, proxy, and TLS certificates, then try again.",
-        defaultAgentErrorMessage(error.CurlConnectError),
+        defaultAgentErrorMessage(error.HttpConnectError),
     );
 }
 

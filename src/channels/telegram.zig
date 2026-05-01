@@ -1832,7 +1832,7 @@ pub const TelegramChannel = struct {
             return .{ .path = file_path };
         }
 
-        // Expand leading ~/ (or ~\ on Windows) so curl receives an absolute path.
+        // Expand leading ~/ (or ~\ on Windows) before local file upload.
         if (file_path.len >= 2 and file_path[0] == '~' and (file_path[1] == '/' or file_path[1] == '\\')) {
             const home = try platform.getHomeDir(allocator);
             defer allocator.free(home);
@@ -1847,17 +1847,17 @@ pub const TelegramChannel = struct {
         return .{ .path = file_path };
     }
 
-    /// Send a photo via curl multipart form POST.
+    /// Send a photo via multipart form POST.
     pub fn sendPhoto(self: *TelegramChannel, chat_id: []const u8, allocator: std.mem.Allocator, photo_path: []const u8, caption: ?[]const u8) !void {
         try self.sendMediaMultipart(chat_id, allocator, .image, photo_path, caption);
     }
 
-    /// Send a document via curl multipart form POST.
+    /// Send a document via multipart form POST.
     pub fn sendDocument(self: *TelegramChannel, chat_id: []const u8, allocator: std.mem.Allocator, doc_path: []const u8, caption: ?[]const u8) !void {
         try self.sendMediaMultipart(chat_id, allocator, .document, doc_path, caption);
     }
 
-    /// Send any media type via curl multipart form POST.
+    /// Send any media type via multipart form POST.
     fn sendMediaMultipart(
         self: *TelegramChannel,
         target: []const u8,
@@ -2532,7 +2532,7 @@ pub const TelegramChannel = struct {
         return writer.buffered();
     }
 
-    /// Poll for updates using long-polling (getUpdates) via curl.
+    /// Poll for updates using long-polling (getUpdates).
     /// Returns a slice of ChannelMessages allocated on the given allocator.
     /// Voice and audio messages are automatically transcribed via Groq Whisper
     /// when a Groq API key is configured (config or GROQ_API_KEY env var).
@@ -4428,8 +4428,8 @@ test "telegram sendMediaMultipart URL detection for local file" {
 }
 
 test "telegram sendMediaMultipart data URI treated as local file" {
-    // data: URIs are NOT treated as URLs in sendMediaMultipart (would overflow the
-    // 1024-byte buffer and curl can't upload them). They are passed as local file @paths.
+    // data: URIs are NOT treated as URLs in sendMediaMultipart. They are passed
+    // as local file paths to match the multipart upload path.
     const data_uri = "data:image/png;base64,iVBOR";
     try std.testing.expect(!(std.mem.startsWith(u8, data_uri, "http://") or
         std.mem.startsWith(u8, data_uri, "https://")));

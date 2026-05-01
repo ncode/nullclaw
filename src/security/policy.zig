@@ -89,7 +89,7 @@ pub const SecurityPolicy = struct {
     require_approval_for_medium_risk: bool = true,
     block_high_risk_commands: bool = true,
     /// When true, skip the single-`&` check entirely so that bare
-    /// `&` in URLs (e.g. `curl https://...?a=1&b=2`) is permitted.
+    /// `&` in URLs (e.g. `https://...?a=1&b=2`) is permitted.
     allow_raw_url_chars: bool = false,
     tracker: ?*RateTracker = null,
 

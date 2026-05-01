@@ -397,7 +397,7 @@ pub const OneBotChannel = struct {
             headers = &headers_buf;
         }
 
-        const resp = root.http_util.curlPostWithStatus(self.allocator, url, body, headers) catch |err| {
+        const resp = root.http_util.httpPostWithStatus(self.allocator, url, body, headers) catch |err| {
             log.err("OneBot API POST failed: {}", .{err});
             return error.OneBotApiError;
         };
