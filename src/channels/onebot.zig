@@ -368,23 +368,8 @@ pub const OneBotChannel = struct {
         var url_buf: [512]u8 = undefined;
         const url = try buildSendApiUrl(&url_buf, self.config.url);
 
-        // Build JSON body dynamically
-        var body_list: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_list.deinit(self.allocator);
-        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
-        defer body_list = body_writer.toArrayList();
-        const bw = &body_writer.writer;
-        try bw.writeAll("{\"action\":\"send_msg\",\"params\":{");
-        try bw.print("\"message_type\":\"{s}\",", .{msg_type});
-        if (std.mem.eql(u8, msg_type, "group")) {
-            try bw.print("\"group_id\":{s},", .{id_str});
-        } else {
-            try bw.print("\"user_id\":{s},", .{id_str});
-        }
-        try bw.writeAll("\"message\":");
-        try root.appendJsonStringW(bw, text);
-        try bw.writeAll("}}");
-        const body = body_list.items;
+        const body = try buildSendMessageRequestBody(self.allocator, msg_type, id_str, text);
+        defer self.allocator.free(body);
 
         // Build headers
         var headers_buf: [1][]const u8 = undefined;
@@ -545,6 +530,31 @@ fn parseTarget(target: []const u8) struct { []const u8, []const u8 } {
         return .{ target[0..colon], target[colon + 1 ..] };
     }
     return .{ "private", target };
+}
+
+fn buildSendMessageRequestBody(
+    allocator: std.mem.Allocator,
+    msg_type: []const u8,
+    id_str: []const u8,
+    text: []const u8,
+) ![]u8 {
+    var body_list: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer body_list.deinit(allocator);
+    var body_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &body_list);
+    errdefer body_writer.deinit();
+    const bw = &body_writer.writer;
+    try bw.writeAll("{\"action\":\"send_msg\",\"params\":{");
+    try bw.print("\"message_type\":\"{s}\",", .{msg_type});
+    if (std.mem.eql(u8, msg_type, "group")) {
+        try bw.print("\"group_id\":{s},", .{id_str});
+    } else {
+        try bw.print("\"user_id\":{s},", .{id_str});
+    }
+    try bw.writeAll("\"message\":");
+    try root.appendJsonStringW(bw, text);
+    try bw.writeAll("}}");
+    body_list = body_writer.toArrayList();
+    return try body_list.toOwnedSlice(allocator);
 }
 
 const OneBotConnectParts = struct {
@@ -835,6 +845,14 @@ test "parseTarget no prefix defaults to private" {
     const msg_type, const id = parseTarget("12345");
     try std.testing.expectEqualStrings("private", msg_type);
     try std.testing.expectEqualStrings("12345", id);
+}
+
+test "onebot buildSendMessageRequestBody includes non-empty body" {
+    const alloc = std.testing.allocator;
+    // Regression: Writer.Allocating must be finalized before OneBot HTTP POST reads the body.
+    const body = try buildSendMessageRequestBody(alloc, "group", "67890", "hello onebot");
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings("{\"action\":\"send_msg\",\"params\":{\"message_type\":\"group\",\"group_id\":67890,\"message\":\"hello onebot\"}}", body);
 }
 
 test "parseWebSocketConnectParts supports ws url" {

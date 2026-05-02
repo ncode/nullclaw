@@ -5,7 +5,44 @@ const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
 const cron = @import("../cron.zig");
 const CronScheduler = cron.CronScheduler;
+const CronJob = cron.CronJob;
+const CronRun = cron.CronRun;
 const loadScheduler = @import("cron_add.zig").loadScheduler;
+
+fn formatRunsOutput(allocator: std.mem.Allocator, job_id: []const u8, job: CronJob, runs: []const CronRun) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var buf_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    defer buf_writer.deinit();
+    const w = &buf_writer.writer;
+
+    const last_run_str: []const u8 = if (job.last_run_secs) |lrs| blk: {
+        break :blk try std.fmt.allocPrint(allocator, "{d}", .{lrs});
+    } else "never";
+    defer if (job.last_run_secs != null) allocator.free(last_run_str);
+
+    const last_status = job.last_status orelse "pending";
+    try w.print("Job {s} | last_run: {s} | last_status: {s}\n", .{ job_id, last_run_str, last_status });
+    try w.print("Recent runs ({d}):\n", .{runs.len});
+
+    for (runs) |run| {
+        const output_str = if (run.output) |o|
+            if (o.len > 80) o[0..80] else o
+        else
+            "(none)";
+        const duration = run.duration_ms orelse 0;
+        try w.print("- Run #{d}: {s} | started: {d} | duration: {d}ms | output: {s}\n", .{
+            run.id,
+            run.status,
+            run.started_at_s,
+            duration,
+            output_str,
+        });
+    }
+
+    buf = buf_writer.toArrayList();
+    return try buf.toOwnedSlice(allocator);
+}
 
 /// Cron runs tool — shows execution history for a cron job.
 pub const CronRunsTool = struct {
@@ -54,39 +91,8 @@ pub const CronRunsTool = struct {
             return ToolResult{ .success = true, .output = msg };
         }
 
-        // Format output
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(allocator);
-        var buf_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-        defer buf = buf_writer.toArrayList();
-        const w = &buf_writer.writer;
-
-        // Header with job info
-        const last_run_str: []const u8 = if (job.last_run_secs) |lrs| blk: {
-            break :blk try std.fmt.allocPrint(allocator, "{d}", .{lrs});
-        } else "never";
-        defer if (job.last_run_secs != null) allocator.free(last_run_str);
-
-        const last_status = job.last_status orelse "pending";
-        try w.print("Job {s} | last_run: {s} | last_status: {s}\n", .{ job_id, last_run_str, last_status });
-        try w.print("Recent runs ({d}):\n", .{runs.len});
-
-        for (runs) |run| {
-            const output_str = if (run.output) |o|
-                if (o.len > 80) o[0..80] else o
-            else
-                "(none)";
-            const duration = run.duration_ms orelse 0;
-            try w.print("- Run #{d}: {s} | started: {d} | duration: {d}ms | output: {s}\n", .{
-                run.id,
-                run.status,
-                run.started_at_s,
-                duration,
-                output_str,
-            });
-        }
-
-        return ToolResult{ .success = true, .output = try buf.toOwnedSlice(allocator) };
+        const output = try formatRunsOutput(allocator, job_id, job.*, runs);
+        return ToolResult{ .success = true, .output = output };
     }
 };
 
@@ -160,6 +166,13 @@ test "cron_runs_shows_history" {
     try std.testing.expectEqual(@as(?i64, 1000), runs[0].duration_ms);
     try std.testing.expectEqualStrings("hello world", runs[0].output.?);
     try std.testing.expect(runs[1].output == null);
+
+    // Regression: Writer.Allocating must be finalized before returning formatted tool output.
+    const output = try formatRunsOutput(allocator, job_id, job.*, runs);
+    defer allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Recent runs (2):") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "hello world") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(none)") != null);
 }
 
 test "cron_runs tool name" {

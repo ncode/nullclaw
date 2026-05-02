@@ -69,7 +69,7 @@ pub fn formatResults(allocator: std.mem.Allocator, json_body: []const u8, query:
         }
     }
 
-    if (entry_len == 0) return common.ToolResult.ok("No web results found.");
+    if (entry_len == 0) return common.noWebResults(allocator);
     return common.formatResultEntries(allocator, query, entries[0..entry_len]);
 }
 

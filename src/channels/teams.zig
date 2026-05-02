@@ -77,6 +77,49 @@ pub const TeamsChannel = struct {
         };
     }
 
+    fn buildTokenRequestBody(self: *TeamsChannel) ![]u8 {
+        var body_list: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer body_list.deinit(self.allocator);
+        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
+        errdefer body_writer.deinit();
+        const bw = &body_writer.writer;
+        try bw.writeAll("grant_type=client_credentials&client_id=");
+        try writeUrlEncoded(bw, self.client_id);
+        try bw.writeAll("&client_secret=");
+        try writeUrlEncoded(bw, self.client_secret);
+        try bw.writeAll("&scope=https%3A%2F%2Fapi.botframework.com%2F.default");
+        body_list = body_writer.toArrayList();
+        return try body_list.toOwnedSlice(self.allocator);
+    }
+
+    fn buildMessageRequestBody(self: *TeamsChannel, text: []const u8) ![]u8 {
+        var body_list: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer body_list.deinit(self.allocator);
+        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
+        errdefer body_writer.deinit();
+        const bw = &body_writer.writer;
+        try bw.writeAll("{\"type\":\"message\",\"text\":");
+        try root.appendJsonStringW(bw, text);
+        try bw.writeByte('}');
+        body_list = body_writer.toArrayList();
+        return try body_list.toOwnedSlice(self.allocator);
+    }
+
+    fn buildConversationRefBody(self: *TeamsChannel, service_url: []const u8, conversation_id: []const u8) ![]u8 {
+        var body_list: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer body_list.deinit(self.allocator);
+        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
+        errdefer body_writer.deinit();
+        const bw = &body_writer.writer;
+        try bw.writeAll("{\"serviceUrl\":");
+        try root.appendJsonStringW(bw, service_url);
+        try bw.writeAll(",\"conversationId\":");
+        try root.appendJsonStringW(bw, conversation_id);
+        try bw.writeByte('}');
+        body_list = body_writer.toArrayList();
+        return try body_list.toOwnedSlice(self.allocator);
+    }
+
     // ── OAuth2 Token Management ─────────────────────────────────────
 
     /// Acquire a new OAuth2 token from Azure AD using client credentials flow.
@@ -87,19 +130,10 @@ pub const TeamsChannel = struct {
         try url_writer.print("https://login.microsoftonline.com/{s}/oauth2/v2.0/token", .{self.tenant_id});
         const token_url = url_writer.buffered();
 
-        // Build form body with URL-encoded values
-        var body_list: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_list.deinit(self.allocator);
-        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
-        defer body_list = body_writer.toArrayList();
-        const bw = &body_writer.writer;
-        try bw.writeAll("grant_type=client_credentials&client_id=");
-        try writeUrlEncoded(bw, self.client_id);
-        try bw.writeAll("&client_secret=");
-        try writeUrlEncoded(bw, self.client_secret);
-        try bw.writeAll("&scope=https%3A%2F%2Fapi.botframework.com%2F.default");
+        const body = try self.buildTokenRequestBody();
+        defer self.allocator.free(body);
 
-        const resp = root.http_util.httpPostForm(self.allocator, token_url, body_list.items) catch |err| {
+        const resp = root.http_util.httpPostForm(self.allocator, token_url, body) catch |err| {
             log.err("Teams OAuth2 token request failed: {}", .{err});
             return error.TeamsTokenError;
         };
@@ -177,15 +211,8 @@ pub const TeamsChannel = struct {
         try url_writer.print("{s}/v3/conversations/{s}/activities", .{ svc, conversation_id });
         const url = url_writer.buffered();
 
-        // Build JSON body: {"type":"message","text":"..."}
-        var body_list: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_list.deinit(self.allocator);
-        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
-        defer body_list = body_writer.toArrayList();
-        const bw = &body_writer.writer;
-        try bw.writeAll("{\"type\":\"message\",\"text\":");
-        try root.appendJsonStringW(bw, text);
-        try bw.writeByte('}');
+        const body = try self.buildMessageRequestBody(text);
+        defer self.allocator.free(body);
 
         // Build auth header
         var auth_buf: [2048]u8 = undefined;
@@ -193,7 +220,7 @@ pub const TeamsChannel = struct {
         try auth_writer.print("Authorization: Bearer {s}", .{token});
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.httpPost(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPost(self.allocator, url, body, &.{auth_header}) catch |err| {
             log.err("Teams Bot Framework POST failed: {}", .{err});
             return error.TeamsSendError;
         };
@@ -234,15 +261,8 @@ pub const TeamsChannel = struct {
         try url_writer.print("{s}/v3/conversations/{s}/activities/{s}", .{ svc, conversation_id, activity_id });
         const url = url_writer.buffered();
 
-        // Build JSON body
-        var body_list: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_list.deinit(self.allocator);
-        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
-        defer body_list = body_writer.toArrayList();
-        const bw = &body_writer.writer;
-        try bw.writeAll("{\"type\":\"message\",\"text\":");
-        try root.appendJsonStringW(bw, text);
-        try bw.writeByte('}');
+        const body = try self.buildMessageRequestBody(text);
+        defer self.allocator.free(body);
 
         // Build auth header
         var auth_buf: [2048]u8 = undefined;
@@ -250,7 +270,7 @@ pub const TeamsChannel = struct {
         try auth_writer.print("Authorization: Bearer {s}", .{token});
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.httpPut(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
+        const resp = root.http_util.httpPut(self.allocator, url, body, &.{auth_header}) catch |err| {
             log.err("Teams Bot Framework PUT (update) failed: {}", .{err});
             return error.TeamsSendError;
         };
@@ -279,20 +299,12 @@ pub const TeamsChannel = struct {
         try path_writer.print("{s}/teams_conversation_ref.json", .{config_dir});
         const path = path_writer.buffered();
 
-        var body_list: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_list.deinit(self.allocator);
-        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
-        defer body_list = body_writer.toArrayList();
-        const bw = &body_writer.writer;
-        try bw.writeAll("{\"serviceUrl\":");
-        try root.appendJsonStringW(bw, service_url);
-        try bw.writeAll(",\"conversationId\":");
-        try root.appendJsonStringW(bw, conversation_id);
-        try bw.writeByte('}');
+        const body = try self.buildConversationRefBody(service_url, conversation_id);
+        defer self.allocator.free(body);
 
         const file = try fs_compat.createPath(path, .{});
         defer file.close();
-        try file.writeAll(body_list.items);
+        try file.writeAll(body);
 
         log.info("Teams conversation reference saved to {s}", .{path});
     }
@@ -646,6 +658,43 @@ test "Teams startTyping and stopTyping are safe in tests" {
     // startTyping returns immediately when not running (running = false by default)
     try ch.startTyping("https://smba.trafficmanager.net/teams|19:abc@thread.v2");
     try ch.stopTyping("https://smba.trafficmanager.net/teams|19:abc@thread.v2");
+}
+
+test "Teams buildTokenRequestBody finalizes form body" {
+    var ch = TeamsChannel{
+        .allocator = std.testing.allocator,
+        .client_id = "client id",
+        .client_secret = "secret/value",
+        .tenant_id = "test-tenant",
+    };
+    // Regression: Writer.Allocating must be finalized before HTTP submission reads the body.
+    const body = try ch.buildTokenRequestBody();
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("grant_type=client_credentials&client_id=client+id&client_secret=secret%2Fvalue&scope=https%3A%2F%2Fapi.botframework.com%2F.default", body);
+}
+
+test "Teams buildMessageRequestBody finalizes json body" {
+    var ch = TeamsChannel{
+        .allocator = std.testing.allocator,
+        .client_id = "test-client-id",
+        .client_secret = "test-secret",
+        .tenant_id = "test-tenant",
+    };
+    const body = try ch.buildMessageRequestBody("hello teams");
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("{\"type\":\"message\",\"text\":\"hello teams\"}", body);
+}
+
+test "Teams buildConversationRefBody finalizes json body" {
+    var ch = TeamsChannel{
+        .allocator = std.testing.allocator,
+        .client_id = "test-client-id",
+        .client_secret = "test-secret",
+        .tenant_id = "test-tenant",
+    };
+    const body = try ch.buildConversationRefBody("https://svc.example", "conv-1");
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("{\"serviceUrl\":\"https://svc.example\",\"conversationId\":\"conv-1\"}", body);
 }
 
 test "Teams stopTyping is idempotent" {

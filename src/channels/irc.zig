@@ -21,6 +21,33 @@ const MAX_NICK_RETRIES: usize = 5;
 /// IRC service bot names to filter out.
 const SERVICE_BOTS = [_][]const u8{ "NickServ", "ChanServ", "BotServ", "MemoServ" };
 
+fn buildInboundMetadata(
+    allocator: std.mem.Allocator,
+    account_id: []const u8,
+    chat_id: []const u8,
+    is_channel: bool,
+) ![]u8 {
+    var metadata_buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer metadata_buf.deinit(allocator);
+    var metadata_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &metadata_buf);
+    errdefer metadata_writer.deinit();
+    const mw = &metadata_writer.writer;
+    try mw.writeByte('{');
+    try mw.writeAll("\"account_id\":");
+    try root.appendJsonStringW(mw, account_id);
+    try mw.writeAll(",\"is_dm\":");
+    try mw.writeAll(if (is_channel) "false" else "true");
+    try mw.writeAll(",\"is_group\":");
+    try mw.writeAll(if (is_channel) "true" else "false");
+    if (is_channel) {
+        try mw.writeAll(",\"channel_id\":");
+        try root.appendJsonStringW(mw, chat_id);
+    }
+    try mw.writeByte('}');
+    metadata_buf = metadata_writer.toArrayList();
+    return try metadata_buf.toOwnedSlice(allocator);
+}
+
 /// IRC channel with optional TLS support.
 /// Joins configured channels, forwards PRIVMSG messages.
 pub const IrcChannel = struct {
@@ -239,23 +266,8 @@ pub const IrcChannel = struct {
         const content = try content_buf.toOwnedSlice(self.allocator);
         defer self.allocator.free(content);
 
-        var metadata_buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer metadata_buf.deinit(self.allocator);
-        var metadata_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &metadata_buf);
-        defer metadata_buf = metadata_writer.toArrayList();
-        const mw = &metadata_writer.writer;
-        try mw.writeByte('{');
-        try mw.writeAll("\"account_id\":");
-        try root.appendJsonStringW(mw, self.account_id);
-        try mw.writeAll(",\"is_dm\":");
-        try mw.writeAll(if (is_channel) "false" else "true");
-        try mw.writeAll(",\"is_group\":");
-        try mw.writeAll(if (is_channel) "true" else "false");
-        if (is_channel) {
-            try mw.writeAll(",\"channel_id\":");
-            try root.appendJsonStringW(mw, chat_id);
-        }
-        try mw.writeByte('}');
+        const metadata = try buildInboundMetadata(self.allocator, self.account_id, chat_id, is_channel);
+        defer self.allocator.free(metadata);
 
         const msg = try bus_mod.makeInboundFull(
             self.allocator,
@@ -265,7 +277,7 @@ pub const IrcChannel = struct {
             content,
             session_key,
             &.{},
-            metadata_buf.items,
+            metadata,
         );
         if (self.bus) |b| {
             b.publishInbound(msg) catch |err| {
@@ -963,6 +975,14 @@ test "irc style prefix exists" {
     try std.testing.expect(std.mem.indexOf(u8, IRC_STYLE_PREFIX, "IRC") != null);
 }
 
+test "irc buildInboundMetadata includes non-empty channel metadata" {
+    const alloc = std.testing.allocator;
+    // Regression: Writer.Allocating must be finalized before makeInboundFull reads metadata.
+    const metadata = try buildInboundMetadata(alloc, "irc-main", "#general", true);
+    defer alloc.free(metadata);
+    try std.testing.expectEqualStrings("{\"account_id\":\"irc-main\",\"is_dm\":false,\"is_group\":true,\"channel_id\":\"#general\"}", metadata);
+}
+
 test "irc handleInboundLine publishes allowed group message to bus" {
     const alloc = std.testing.allocator;
     var eb = bus_mod.Bus.init();
@@ -983,6 +1003,8 @@ test "irc handleInboundLine publishes allowed group message to bus" {
     try std.testing.expect(std.mem.startsWith(u8, msg.content, IRC_STYLE_PREFIX));
     try std.testing.expect(std.mem.indexOf(u8, msg.content, "alice: hello team") != null);
     try std.testing.expect(msg.metadata_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg.metadata_json.?, "\"account_id\":\"irc-main\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg.metadata_json.?, "\"channel_id\":\"#general\"") != null);
 }
 
 test "irc handleInboundLine drops disallowed sender" {

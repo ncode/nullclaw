@@ -1332,7 +1332,38 @@ pub const Config = struct {
         try writePrettyField(self.allocator, w, "  ", "memory", serialized_memory, ",\n");
         try writePrettyField(self.allocator, w, "  ", "gateway", self.gateway, ",\n");
         try writePrettyField(self.allocator, w, "  ", "a2a", self.a2a, ",\n");
-        try writePrettyField(self.allocator, w, "  ", "tunnel", self.tunnel, ",\n");
+        var serialized_tunnel = self.tunnel;
+        if (serialized_tunnel.cloudflare) |*cloudflare| {
+            cloudflare.token = try self.encryptConfigSecret(&store, cloudflare.token);
+        }
+        defer if (serialized_tunnel.cloudflare) |cloudflare| {
+            if (cloudflare.token) |token| {
+                if (self.tunnel.cloudflare == null or self.tunnel.cloudflare.?.token == null or token.ptr != self.tunnel.cloudflare.?.token.?.ptr) {
+                    self.allocator.free(token);
+                }
+            }
+        };
+        if (serialized_tunnel.ngrok) |*ngrok| {
+            ngrok.auth_token = try self.encryptConfigSecret(&store, ngrok.auth_token);
+        }
+        defer if (serialized_tunnel.ngrok) |ngrok| {
+            if (ngrok.auth_token) |token| {
+                if (self.tunnel.ngrok == null or self.tunnel.ngrok.?.auth_token == null or token.ptr != self.tunnel.ngrok.?.auth_token.?.ptr) {
+                    self.allocator.free(token);
+                }
+            }
+        };
+        if (serialized_tunnel.tailscale) |*tailscale| {
+            tailscale.auth_key = try self.encryptConfigSecret(&store, tailscale.auth_key);
+        }
+        defer if (serialized_tunnel.tailscale) |tailscale| {
+            if (tailscale.auth_key) |auth_key| {
+                if (self.tunnel.tailscale == null or self.tunnel.tailscale.?.auth_key == null or auth_key.ptr != self.tunnel.tailscale.?.auth_key.?.ptr) {
+                    self.allocator.free(auth_key);
+                }
+            }
+        };
+        try writePrettyField(self.allocator, w, "  ", "tunnel", serialized_tunnel, ",\n");
         var serialized_composio = self.composio;
         if (serialized_composio.api_key) |api_key| {
             serialized_composio.api_key = try store.encryptSecret(self.allocator, api_key);
@@ -2613,9 +2644,17 @@ test "save roundtrip preserves extended config sections" {
     cfg.gateway.paired_tokens = &.{ "tok-1", "tok-2" };
 
     cfg.tunnel.provider = "ngrok";
+    cfg.tunnel.cloudflare = .{
+        .token = "cloudflare-test-token",
+    };
     cfg.tunnel.ngrok = .{
         .auth_token = "ngrok-test-token",
         .domain = "test.ngrok-free.app",
+    };
+    cfg.tunnel.tailscale = .{
+        .funnel = true,
+        .hostname = "nullclaw.ts.net",
+        .auth_key = "tskey-auth-k123",
     };
 
     cfg.composio.enabled = true;
@@ -2723,9 +2762,15 @@ test "save roundtrip preserves extended config sections" {
     try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), loaded.gateway.max_body_size_bytes);
     try std.testing.expectEqual(@as(u64, 45), loaded.gateway.request_timeout_secs);
     try std.testing.expectEqualStrings("ngrok", loaded.tunnel.provider);
+    try std.testing.expect(loaded.tunnel.cloudflare != null);
+    try std.testing.expectEqualStrings("cloudflare-test-token", loaded.tunnel.cloudflare.?.token.?);
     try std.testing.expect(loaded.tunnel.ngrok != null);
     try std.testing.expectEqualStrings("ngrok-test-token", loaded.tunnel.ngrok.?.auth_token.?);
     try std.testing.expectEqualStrings("test.ngrok-free.app", loaded.tunnel.ngrok.?.domain.?);
+    try std.testing.expect(loaded.tunnel.tailscale != null);
+    try std.testing.expect(loaded.tunnel.tailscale.?.funnel);
+    try std.testing.expectEqualStrings("nullclaw.ts.net", loaded.tunnel.tailscale.?.hostname.?);
+    try std.testing.expectEqualStrings("tskey-auth-k123", loaded.tunnel.tailscale.?.auth_key.?);
     try std.testing.expect(loaded.composio.enabled);
     try std.testing.expect(!loaded.secrets.encrypt);
     try std.testing.expect(loaded.browser.enabled);
@@ -4344,6 +4389,16 @@ test "json parse autonomy allow_raw_url_chars" {
     try std.testing.expect(cfg.autonomy.allow_raw_url_chars);
 }
 
+test "json parse autonomy block_medium_risk_commands" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"autonomy": {"block_medium_risk_commands": false}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expect(!cfg.autonomy.block_medium_risk_commands);
+}
+
 test "json parse gateway paired tokens" {
     const allocator = std.testing.allocator;
     const json =
@@ -5889,6 +5944,19 @@ test "save encrypts persisted api keys and parse decrypts them" {
     cfg.memory.search.store.qdrant_api_key = "qdrant-secret";
     cfg.memory.api.api_key = "memory-secret";
     cfg.composio.api_key = "comp-secret";
+    cfg.tunnel.provider = "tailscale";
+    cfg.tunnel.cloudflare = .{
+        .token = "cloudflare-secret",
+    };
+    cfg.tunnel.ngrok = .{
+        .auth_token = "ngrok-secret",
+        .domain = "test.ngrok-free.app",
+    };
+    cfg.tunnel.tailscale = .{
+        .funnel = true,
+        .hostname = "nullclaw.ts.net",
+        .auth_key = "tskey-secret",
+    };
 
     try cfg.save();
 
@@ -5906,6 +5974,9 @@ test "save encrypts persisted api keys and parse decrypts them" {
         "qdrant-secret",
         "memory-secret",
         "comp-secret",
+        "cloudflare-secret",
+        "ngrok-secret",
+        "tskey-secret",
     };
     for (secret_values) |secret| {
         try std.testing.expect(std.mem.indexOf(u8, content, secret) == null);
@@ -5929,6 +6000,9 @@ test "save encrypts persisted api keys and parse decrypts them" {
     try std.testing.expectEqualStrings("qdrant-secret", loaded.memory.search.store.qdrant_api_key);
     try std.testing.expectEqualStrings("memory-secret", loaded.memory.api.api_key);
     try std.testing.expectEqualStrings("comp-secret", loaded.composio.api_key.?);
+    try std.testing.expectEqualStrings("cloudflare-secret", loaded.tunnel.cloudflare.?.token.?);
+    try std.testing.expectEqualStrings("ngrok-secret", loaded.tunnel.ngrok.?.auth_token.?);
+    try std.testing.expectEqualStrings("tskey-secret", loaded.tunnel.tailscale.?.auth_key.?);
 }
 
 test "json parse tools.media.audio section" {

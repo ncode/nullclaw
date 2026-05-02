@@ -3,10 +3,12 @@ const build_options = @import("build_options");
 const channel_catalog = @import("channel_catalog.zig");
 const config_mod = @import("config.zig");
 const memory_registry = @import("memory/engines/registry.zig");
+const terminal_color = @import("terminal_color.zig");
 const tools_mod = @import("tools/root.zig");
 
 const Config = config_mod.Config;
 const Tool = tools_mod.Tool;
+const Color = terminal_color.Color;
 
 const core_tool_names = [_][]const u8{
     "shell",
@@ -200,6 +202,52 @@ fn appendJsonStringArray(w: anytype, names: []const []const u8) !void {
     try w.writeAll("]");
 }
 
+fn channelStatusColor(status: []const u8) []const u8 {
+    if (std.mem.eql(u8, status, "enabled") or
+        std.mem.eql(u8, status, "enabled in build") or
+        std.mem.startsWith(u8, status, "configured"))
+    {
+        return Color.green;
+    }
+    if (std.mem.eql(u8, status, "not configured")) return Color.yellow;
+    if (std.mem.indexOf(u8, status, "disabled") != null) return Color.red;
+    return "";
+}
+
+fn buildChannelStatusTable(allocator: std.mem.Allocator, cfg_opt: ?*const Config, colorize: bool) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var out_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &out);
+    const w = &out_writer.writer;
+
+    var sorted = channel_catalog.known_channels;
+    std.mem.sort(channel_catalog.ChannelMeta, &sorted, {}, struct {
+        fn lessThan(_: void, a: channel_catalog.ChannelMeta, b: channel_catalog.ChannelMeta) bool {
+            return std.mem.lessThan(u8, a.key, b.key);
+        }
+    }.lessThan);
+
+    try w.writeAll("    key          status\n");
+    try w.writeAll("    -----------  --------------------------\n");
+    for (sorted) |meta| {
+        var status_buf: [64]u8 = undefined;
+        const status = if (cfg_opt) |cfg|
+            channel_catalog.statusText(cfg, meta, &status_buf)
+        else if (channel_catalog.isBuildEnabled(meta.id))
+            "enabled in build"
+        else
+            "disabled in build";
+        const color = if (colorize) channelStatusColor(status) else "";
+        if (color.len != 0) try w.writeAll(color);
+        try w.print("    {s:<11}  {s}", .{ meta.key, status });
+        if (color.len != 0) try w.writeAll(Color.reset);
+        try w.writeByte('\n');
+    }
+
+    out = out_writer.toArrayList();
+    return try out.toOwnedSlice(allocator);
+}
+
 pub fn buildManifestJson(
     allocator: std.mem.Allocator,
     cfg_opt: ?*const Config,
@@ -295,12 +343,17 @@ pub fn buildSummaryText(
     cfg_opt: ?*const Config,
     runtime_tools: ?[]const Tool,
 ) ![]u8 {
-    const channels_enabled = try collectChannelNames(allocator, cfg_opt, .build_enabled);
-    defer allocator.free(channels_enabled);
-    const channels_disabled = try collectChannelNames(allocator, cfg_opt, .build_disabled);
-    defer allocator.free(channels_disabled);
-    const channels_configured = try collectChannelNames(allocator, cfg_opt, .configured);
-    defer allocator.free(channels_configured);
+    return buildSummaryTextWithColor(allocator, cfg_opt, runtime_tools, false);
+}
+
+pub fn buildSummaryTextWithColor(
+    allocator: std.mem.Allocator,
+    cfg_opt: ?*const Config,
+    runtime_tools: ?[]const Tool,
+    colorize: bool,
+) ![]u8 {
+    const channels_status_s = try buildChannelStatusTable(allocator, cfg_opt, colorize);
+    defer allocator.free(channels_status_s);
 
     const engines_enabled = try collectMemoryEngineNames(allocator, .build_enabled);
     defer allocator.free(engines_enabled);
@@ -312,12 +365,6 @@ pub fn buildSummaryText(
     const optional_disabled = try collectOptionalTools(allocator, cfg_opt, .disabled);
     defer allocator.free(optional_disabled);
 
-    const channels_enabled_s = try joinNames(allocator, channels_enabled);
-    defer allocator.free(channels_enabled_s);
-    const channels_disabled_s = try joinNames(allocator, channels_disabled);
-    defer allocator.free(channels_disabled_s);
-    const channels_configured_s = try joinNames(allocator, channels_configured);
-    defer allocator.free(channels_configured_s);
     const engines_enabled_s = try joinNames(allocator, engines_enabled);
     defer allocator.free(engines_enabled_s);
     const engines_disabled_s = try joinNames(allocator, engines_disabled);
@@ -334,23 +381,19 @@ pub fn buildSummaryText(
         allocator,
         "Capabilities\n" ++
             "\nAvailable in this runtime:\n" ++
-            "  channels (build): {s}\n" ++
-            "  channels (configured): {s}\n" ++
+            "  channels:\n{s}" ++
             "  memory engines (build): {s}\n" ++
             "  active memory backend: {s}\n" ++
             "  {s}: {s}\n" ++
             "\nNot available in this runtime:\n" ++
-            "  channels (disabled in build): {s}\n" ++
             "  memory engines (disabled in build): {s}\n" ++
             "  optional tools (disabled by config): {s}\n",
         .{
-            channels_enabled_s,
-            channels_configured_s,
+            channels_status_s,
             engines_enabled_s,
             active_backend,
             tools_label,
             runtime_tools_s,
-            channels_disabled_s,
             engines_disabled_s,
             optional_disabled_s,
         },
@@ -452,5 +495,19 @@ test "buildSummaryText includes availability sections" {
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "Available in this runtime") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "channels:\n    key          status\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "    webhook") != null);
+    const dingtalk_idx = std.mem.indexOf(u8, summary, "    dingtalk") orelse unreachable;
+    const discord_idx = std.mem.indexOf(u8, summary, "    discord") orelse unreachable;
+    try std.testing.expect(dingtalk_idx < discord_idx);
+    try std.testing.expect(std.mem.indexOfScalar(u8, summary, '\x1b') == null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "Not available in this runtime") != null);
+}
+
+test "buildSummaryTextWithColor includes ANSI escapes" {
+    const summary = try buildSummaryTextWithColor(std.testing.allocator, null, null, true);
+    defer std.testing.allocator.free(summary);
+
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\x1b[32m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\x1b[0m") != null);
 }

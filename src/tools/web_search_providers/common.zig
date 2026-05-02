@@ -24,6 +24,8 @@ pub const ResultEntry = struct {
     description: []const u8,
 };
 
+const NO_WEB_RESULTS_MESSAGE = "No web results found.";
+
 pub const ParsedJsonObject = struct {
     parsed: std.json.Parsed(std.json.Value),
     object: std.json.ObjectMap,
@@ -152,10 +154,14 @@ fn hexDigit(v: u8) u8 {
 
 pub fn formatJinaPlainText(allocator: std.mem.Allocator, text: []const u8, query: []const u8) !ToolResult {
     const trimmed = std.mem.trim(u8, text, " \t\n\r");
-    if (trimmed.len == 0) return ToolResult.ok("No web results found.");
+    if (trimmed.len == 0) return noWebResults(allocator);
 
     const output = try std.fmt.allocPrint(allocator, "Results for: {s}\n\n{s}", .{ query, trimmed });
     return ToolResult{ .success = true, .output = output };
+}
+
+pub fn noWebResults(allocator: std.mem.Allocator) !ToolResult {
+    return .{ .success = true, .output = try allocator.dupe(u8, NO_WEB_RESULTS_MESSAGE) };
 }
 
 pub fn formatResultEntries(allocator: std.mem.Allocator, query: []const u8, entries: []const ResultEntry) !ToolResult {
@@ -217,7 +223,7 @@ pub fn formatResultsArray(
     }
 
     if (out_idx == 0) {
-        return ToolResult.ok("No web results found.");
+        return noWebResults(allocator);
     }
 
     return ToolResult.ok(try buf.toOwnedSlice(allocator));

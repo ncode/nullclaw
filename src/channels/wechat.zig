@@ -90,13 +90,14 @@ pub const ParsedWeChatMessage = struct {
 
 fn appendActiveTextPayload(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), to_user: []const u8, text: []const u8) !void {
     var out_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
-    defer out.* = out_writer.toArrayList();
+    errdefer out_writer.deinit();
     const w = &out_writer.writer;
     try w.writeAll("{\"touser\":");
     try root.appendJsonStringW(w, to_user);
     try w.writeAll(",\"msgtype\":\"text\",\"text\":{\"content\":");
     try root.appendJsonStringW(w, text);
     try w.writeAll("}}");
+    out.* = out_writer.toArrayList();
 }
 
 fn fetchAccessToken(allocator: std.mem.Allocator, app_id: []const u8, app_secret: []const u8) ![]u8 {
@@ -464,6 +465,14 @@ test "buildPassiveTextReply emits expected xml" {
     try std.testing.expect(std.mem.containsAtLeast(u8, xml, 1, "<ToUserName><![CDATA[o_user]]></ToUserName>"));
     try std.testing.expect(std.mem.containsAtLeast(u8, xml, 1, "<FromUserName><![CDATA[gh_bot]]></FromUserName>"));
     try std.testing.expect(std.mem.containsAtLeast(u8, xml, 1, "<Content><![CDATA[pong]]></Content>"));
+}
+
+test "wechat appendActiveTextPayload emits expected JSON envelope" {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+
+    try appendActiveTextPayload(std.testing.allocator, &out, "o_user", "hello wechat");
+    try std.testing.expectEqualStrings("{\"touser\":\"o_user\",\"msgtype\":\"text\",\"text\":{\"content\":\"hello wechat\"}}", out.items);
 }
 
 test "extractEncryptedField parses XML Encrypt" {

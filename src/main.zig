@@ -3228,11 +3228,12 @@ fn runCapabilities(allocator: std.mem.Allocator, sub_args: []const []const u8) !
     var cfg_opt: ?yc.config.Config = yc.config.Config.load(allocator) catch null;
     defer if (cfg_opt) |*cfg| cfg.deinit();
     const cfg_ptr: ?*const yc.config.Config = if (cfg_opt) |*cfg| cfg else null;
+    const colorize = yc.doctor.shouldColorize(std_compat.fs.File.stdout());
 
     const output = if (as_json)
         try yc.capabilities.buildManifestJson(allocator, cfg_ptr, null)
     else
-        try yc.capabilities.buildSummaryText(allocator, cfg_ptr, null);
+        try yc.capabilities.buildSummaryTextWithColor(allocator, cfg_ptr, null, colorize);
     defer allocator.free(output);
 
     try yc.admin_output.writeStdoutBytes(output);

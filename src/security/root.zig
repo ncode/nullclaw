@@ -21,6 +21,7 @@ pub const firejail = @import("firejail.zig");
 pub const bubblewrap = @import("bubblewrap.zig");
 pub const docker = @import("docker.zig");
 pub const detect = @import("detect.zig");
+pub const external_content = @import("external_content.zig");
 
 // Re-exports for convenience
 pub const AuditEvent = audit.AuditEvent;
@@ -67,6 +68,9 @@ pub const ValidationResult = docker.ValidationResult;
 pub const validateWorkspaceMount = docker.validateWorkspaceMount;
 
 pub const RateTracker = tracker.RateTracker;
+
+pub const wrapExternalContent = external_content.wrapExternalContent;
+pub const ContentSource = external_content.ContentSource;
 
 test {
     // Run tests from all submodules

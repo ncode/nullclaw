@@ -94,13 +94,13 @@ pub const ScheduleTool = struct {
             }
 
             var scheduler = loadScheduler(allocator) catch {
-                return ToolResult.ok("No scheduled jobs.");
+                return ToolResult{ .success = true, .output = try allocator.dupe(u8, "No scheduled jobs.") };
             };
             defer scheduler.deinit();
 
             const jobs = scheduler.listJobs();
             if (jobs.len == 0) {
-                return ToolResult.ok("No scheduled jobs.");
+                return ToolResult{ .success = true, .output = try allocator.dupe(u8, "No scheduled jobs.") };
             }
 
             // Format job list

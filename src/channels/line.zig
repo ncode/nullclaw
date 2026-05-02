@@ -4,6 +4,40 @@ const config_types = @import("../config_types.zig");
 
 const log = std.log.scoped(.line);
 
+fn buildReplyRequestBody(allocator: std.mem.Allocator, reply_token: []const u8, text: []const u8) ![]u8 {
+    var body_list: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer body_list.deinit(allocator);
+    var body_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &body_list);
+    errdefer body_writer.deinit();
+    const w = &body_writer.writer;
+
+    try w.writeAll("{\"replyToken\":");
+    try root.appendJsonStringW(w, reply_token);
+    try w.writeAll(",\"messages\":[{\"type\":\"text\",\"text\":");
+    try root.appendJsonStringW(w, text);
+    try w.writeAll("}]}");
+
+    body_list = body_writer.toArrayList();
+    return try body_list.toOwnedSlice(allocator);
+}
+
+fn buildPushRequestBody(allocator: std.mem.Allocator, user_id: []const u8, text: []const u8) ![]u8 {
+    var body_list: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer body_list.deinit(allocator);
+    var body_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &body_list);
+    errdefer body_writer.deinit();
+    const w = &body_writer.writer;
+
+    try w.writeAll("{\"to\":");
+    try root.appendJsonStringW(w, user_id);
+    try w.writeAll(",\"messages\":[{\"type\":\"text\",\"text\":");
+    try root.appendJsonStringW(w, text);
+    try w.writeAll("}]}");
+
+    body_list = body_writer.toArrayList();
+    return try body_list.toOwnedSlice(allocator);
+}
+
 /// LINE Messaging API channel — webhook-based (push).
 ///
 /// Receives events via LINE webhook endpoint, sends replies via
@@ -51,18 +85,8 @@ pub const LineChannel = struct {
 
     /// Reply to a message using the replyToken (valid for ~30s after event).
     pub fn replyMessage(self: *LineChannel, reply_token: []const u8, text: []const u8) !void {
-        var body_list: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_list.deinit(self.allocator);
-        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
-        defer body_list = body_writer.toArrayList();
-        const w = &body_writer.writer;
-
-        try w.writeAll("{\"replyToken\":\"");
-        try w.writeAll(reply_token);
-        try w.writeAll("\",\"messages\":[{\"type\":\"text\",\"text\":");
-        try root.appendJsonStringW(w, text);
-        try w.writeAll("}]}");
-        const body = body_list.items;
+        const body = try buildReplyRequestBody(self.allocator, reply_token, text);
+        defer self.allocator.free(body);
 
         var auth_buf: [512]u8 = undefined;
         var auth_writer: std.Io.Writer = .fixed(&auth_buf);
@@ -78,18 +102,8 @@ pub const LineChannel = struct {
 
     /// Push a message to a user by userId (no replyToken needed).
     pub fn pushMessage(self: *LineChannel, user_id: []const u8, text: []const u8) !void {
-        var body_list: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_list.deinit(self.allocator);
-        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
-        defer body_list = body_writer.toArrayList();
-        const w = &body_writer.writer;
-
-        try w.writeAll("{\"to\":\"");
-        try w.writeAll(user_id);
-        try w.writeAll("\",\"messages\":[{\"type\":\"text\",\"text\":");
-        try root.appendJsonStringW(w, text);
-        try w.writeAll("}]}");
-        const body = body_list.items;
+        const body = try buildPushRequestBody(self.allocator, user_id, text);
+        defer self.allocator.free(body);
 
         var auth_buf: [512]u8 = undefined;
         var auth_writer: std.Io.Writer = .fixed(&auth_buf);
@@ -413,6 +427,21 @@ test "line health check returns false with no token and not running" {
 
 test "line max message len constant" {
     try std.testing.expectEqual(@as(usize, 5000), LineChannel.MAX_MESSAGE_LEN);
+}
+
+test "line buildReplyRequestBody includes non-empty body" {
+    const alloc = std.testing.allocator;
+    // Regression: Writer.Allocating must be finalized before the LINE POST body is read.
+    const body = try buildReplyRequestBody(alloc, "reply-token", "hello line");
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings("{\"replyToken\":\"reply-token\",\"messages\":[{\"type\":\"text\",\"text\":\"hello line\"}]}", body);
+}
+
+test "line buildPushRequestBody includes non-empty body" {
+    const alloc = std.testing.allocator;
+    const body = try buildPushRequestBody(alloc, "U123", "hello push");
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings("{\"to\":\"U123\",\"messages\":[{\"type\":\"text\",\"text\":\"hello push\"}]}", body);
 }
 
 test "line api urls" {

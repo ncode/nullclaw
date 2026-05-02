@@ -115,6 +115,9 @@ pub const WebSearchTool = struct {
                     continue;
                 },
             };
+            if (result.success) {
+                return wrapSuccessfulProviderResult(allocator, result);
+            }
             return result;
         }
 
@@ -305,6 +308,17 @@ fn executeWithProvider(
     }
 }
 
+fn wrapSuccessfulProviderResult(allocator: std.mem.Allocator, result: ToolResult) !ToolResult {
+    std.debug.assert(result.success);
+    defer allocator.free(result.output);
+
+    const security = @import("../security/root.zig");
+    return ToolResult{
+        .success = true,
+        .output = try security.wrapExternalContent(allocator, result.output, .web_search),
+    };
+}
+
 fn tryApiKeyFromEnvOrNull(allocator: std.mem.Allocator, names: []const []const u8) ?[]const u8 {
     for (names) |name| {
         const key = platform.getEnvOrNull(allocator, name) orelse continue;
@@ -489,6 +503,17 @@ test "buildProviderChain rejects invalid fallback provider" {
     try testing.expectError(error.InvalidProvider, buildProviderChain(&wst, "auto", &chain_buf));
 }
 
+test "wrapSuccessfulProviderResult wraps web search output" {
+    const output = try testing.allocator.dupe(u8, "raw result");
+    const wrapped = try wrapSuccessfulProviderResult(testing.allocator, .{ .success = true, .output = output });
+    defer testing.allocator.free(wrapped.output);
+
+    try testing.expect(wrapped.success);
+    try testing.expect(std.mem.indexOf(u8, wrapped.output, "<<<UNTRUSTED_EXTERNAL_CONTENT id=\"") != null);
+    try testing.expect(std.mem.indexOf(u8, wrapped.output, "Source: Web Search") != null);
+    try testing.expect(std.mem.indexOf(u8, wrapped.output, "raw result") != null);
+}
+
 test "parseCount defaults to 5" {
     const p1 = try root.parseTestArgs("{}");
     defer p1.deinit();
@@ -624,6 +649,7 @@ test "formatDuckDuckGoResults parses related topics" {
 test "formatBraveResults empty results" {
     const json = "{\"web\":{\"results\":[]}}";
     const result = try formatBraveResults(testing.allocator, json, "nothing");
+    defer testing.allocator.free(result.output);
     try testing.expect(result.success);
     try testing.expectEqualStrings("No web results found.", result.output);
 }
@@ -631,6 +657,7 @@ test "formatBraveResults empty results" {
 test "formatSearxngResults empty results" {
     const json = "{\"results\":[]}";
     const result = try formatSearxngResults(testing.allocator, json, "nothing");
+    defer testing.allocator.free(result.output);
     try testing.expect(result.success);
     try testing.expectEqualStrings("No web results found.", result.output);
 }

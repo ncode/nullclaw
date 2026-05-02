@@ -83,6 +83,28 @@ fn validateChoices(choices: []const root.Channel.OutboundChoice) bool {
     return true;
 }
 
+fn buildThreadStatusRequestBody(
+    allocator: std.mem.Allocator,
+    channel_id: []const u8,
+    thread_ts: []const u8,
+    status: []const u8,
+) ![]u8 {
+    var body_list: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer body_list.deinit(allocator);
+    var body_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &body_list);
+    errdefer body_writer.deinit();
+    const bw = &body_writer.writer;
+    try bw.writeAll("{\"channel_id\":");
+    try root.appendJsonStringW(bw, channel_id);
+    try bw.writeAll(",\"thread_ts\":");
+    try root.appendJsonStringW(bw, thread_ts);
+    try bw.writeAll(",\"status\":");
+    try root.appendJsonStringW(bw, status);
+    try bw.writeByte('}');
+    body_list = body_writer.toArrayList();
+    return try body_list.toOwnedSlice(allocator);
+}
+
 /// Slack channel — socket/http event pipeline for inbound, chat.postMessage for outbound.
 pub const SlackChannel = struct {
     allocator: std.mem.Allocator,
@@ -1176,26 +1198,15 @@ pub const SlackChannel = struct {
         if (channel_id.len == 0 or thread_ts.len == 0) return;
 
         const url = API_BASE ++ "/assistant.threads.setStatus";
-        var body_list: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_list.deinit(self.allocator);
-
-        var body_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &body_list);
-        defer body_list = body_writer.toArrayList();
-        const bw = &body_writer.writer;
-        bw.writeAll("{\"channel_id\":") catch return;
-        root.appendJsonStringW(bw, channel_id) catch return;
-        bw.writeAll(",\"thread_ts\":") catch return;
-        root.appendJsonStringW(bw, thread_ts) catch return;
-        bw.writeAll(",\"status\":") catch return;
-        root.appendJsonStringW(bw, status) catch return;
-        bw.writeByte('}') catch return;
+        const body = buildThreadStatusRequestBody(self.allocator, channel_id, thread_ts, status) catch return;
+        defer self.allocator.free(body);
 
         var auth_buf: [512]u8 = undefined;
         var auth_writer: std.Io.Writer = .fixed(&auth_buf);
         auth_writer.print("Authorization: Bearer {s}", .{self.normalizedBotToken()}) catch return;
         const auth_header = auth_writer.buffered();
 
-        const resp = root.http_util.httpPost(self.allocator, url, body_list.items, &.{auth_header}) catch return;
+        const resp = root.http_util.httpPost(self.allocator, url, body, &.{auth_header}) catch return;
         self.allocator.free(resp);
     }
 
@@ -1870,6 +1881,14 @@ test "slack setThreadStatus is no-op in tests" {
     const allowed = [_][]const u8{};
     var ch = SlackChannel.init(std.testing.allocator, "tok", null, null, &allowed);
     ch.setThreadStatus("C12345", "1700000000.100", "is typing...");
+}
+
+test "slack buildThreadStatusRequestBody includes non-empty body" {
+    const alloc = std.testing.allocator;
+    // Regression: Writer.Allocating must be finalized before Slack status POST reads the body.
+    const body = try buildThreadStatusRequestBody(alloc, "C12345", "1700000000.100", "is typing...");
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings("{\"channel_id\":\"C12345\",\"thread_ts\":\"1700000000.100\",\"status\":\"is typing...\"}", body);
 }
 
 test "slack startTyping and stopTyping are safe in tests" {

@@ -50,23 +50,23 @@ pub fn formatResults(allocator: std.mem.Allocator, json_body: []const u8, query:
     };
 
     const web = root_val.get("web") orelse
-        return common.ToolResult.ok("No web results found.");
+        return common.noWebResults(allocator);
 
     const web_obj = switch (web) {
         .object => |o| o,
-        else => return common.ToolResult.ok("No web results found."),
+        else => return common.noWebResults(allocator),
     };
 
     const results = web_obj.get("results") orelse
-        return common.ToolResult.ok("No web results found.");
+        return common.noWebResults(allocator);
 
     const results_arr = switch (results) {
         .array => |a| a,
-        else => return common.ToolResult.ok("No web results found."),
+        else => return common.noWebResults(allocator),
     };
 
     if (results_arr.items.len == 0)
-        return common.ToolResult.ok("No web results found.");
+        return common.noWebResults(allocator);
 
     return common.formatResultsArray(allocator, results_arr.items, query, "description", null);
 }

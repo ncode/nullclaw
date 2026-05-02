@@ -1,6 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
-const json_util = @import("../json_util.zig");
+const root = @import("root.zig");
 
 const log = std.log.scoped(.stdio_jsonrpc);
 
@@ -461,16 +461,17 @@ fn buildJsonRpcRequest(allocator: std.mem.Allocator, request_id: u32, method: []
     errdefer buf.deinit(allocator);
 
     var buf_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    defer buf = buf_writer.toArrayList();
+    defer buf_writer.deinit();
     const writer = &buf_writer.writer;
     try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
     try writer.print("{d}", .{request_id});
     try writer.writeAll(",\"method\":");
-    try json_util.appendJsonString(&buf, allocator, method);
+    try root.appendJsonStringW(writer, method);
     try writer.writeAll(",\"params\":");
     try writer.writeAll(params_json);
     try writer.writeAll("}");
 
+    buf = buf_writer.toArrayList();
     return buf.toOwnedSlice(allocator);
 }
 
@@ -478,4 +479,12 @@ fn remainingRequestTimeoutNs(deadline_ns: i128) u64 {
     const remaining_ns = deadline_ns - std_compat.time.nanoTimestamp();
     if (remaining_ns <= 0) return 0;
     return @intCast(remaining_ns);
+}
+
+test "stdio_jsonrpc buildJsonRpcRequest includes finalized body" {
+    const alloc = std.testing.allocator;
+    // Regression: Writer.Allocating must be finalized before returning the request slice.
+    const body = try buildJsonRpcRequest(alloc, 7, "tools/call", "{\"name\":\"x\"}");
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"x\"}}", body);
 }
