@@ -2459,7 +2459,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (cf == .object) {
                     var cf_cfg = types.CloudflareTunnelConfig{};
                     if (cf.object.get("token")) |tok| {
-                        if (tok == .string) cf_cfg.token = try self.allocator.dupe(u8, tok.string);
+                        if (tok == .string) cf_cfg.token = try decryptSecretField(self.allocator, self.config_path, tok.string);
                     }
                     self.tunnel.cloudflare = cf_cfg;
                 }
@@ -2469,7 +2469,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (ng == .object) {
                     var ng_cfg = types.NgrokTunnelConfig{};
                     if (ng.object.get("auth_token")) |tok| {
-                        if (tok == .string) ng_cfg.auth_token = try self.allocator.dupe(u8, tok.string);
+                        if (tok == .string) ng_cfg.auth_token = try decryptSecretField(self.allocator, self.config_path, tok.string);
                     }
                     if (ng.object.get("domain")) |dom| {
                         if (dom == .string) ng_cfg.domain = try self.allocator.dupe(u8, dom.string);
@@ -2486,6 +2486,9 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     }
                     if (ts.object.get("hostname")) |hn| {
                         if (hn == .string) ts_cfg.hostname = try self.allocator.dupe(u8, hn.string);
+                    }
+                    if (ts.object.get("auth_key")) |ak| {
+                        if (ak == .string) ts_cfg.auth_key = try decryptSecretField(self.allocator, self.config_path, ak.string);
                     }
                     self.tunnel.tailscale = ts_cfg;
                 }

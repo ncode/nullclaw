@@ -1458,6 +1458,13 @@ fn cronJsonPathFromDir(allocator: std.mem.Allocator, config_dir: []const u8) ![]
 fn cronJsonPath(allocator: std.mem.Allocator) ![]const u8 {
     const dir = try config_paths.defaultConfigDir(allocator);
     defer allocator.free(dir);
+
+    if (builtin.is_test) {
+        const leaf = try std.fmt.allocPrint(allocator, "cron-{d}.json", .{std.Thread.getCurrentId()});
+        defer allocator.free(leaf);
+        return config_paths.pathFromConfigDir(allocator, dir, leaf);
+    }
+
     return cronJsonPathFromDir(allocator, dir);
 }
 
@@ -2490,6 +2497,25 @@ pub const Task = CronJob;
 
 // ── Tests ────────────────────────────────────────────────────────────
 
+var cron_store_test_mutex: std_compat.sync.Mutex = .{};
+
+fn resetCronStoreForTest(allocator: std.mem.Allocator) !void {
+    const path = try cronJsonPath(allocator);
+    defer allocator.free(path);
+
+    std_compat.fs.deleteFileAbsolute(path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+    defer allocator.free(tmp_path);
+    std_compat.fs.deleteFileAbsolute(tmp_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
 test "parseDuration minutes" {
     try std.testing.expectEqual(@as(i64, 1800), try parseDuration("30m"));
 }
@@ -2680,6 +2706,11 @@ test "CronScheduler getJob found and missing" {
 }
 
 test "save and load roundtrip" {
+    cron_store_test_mutex.lock();
+    defer cron_store_test_mutex.unlock();
+    try resetCronStoreForTest(std.testing.allocator);
+    defer resetCronStoreForTest(std.testing.allocator) catch {};
+
     var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
     defer scheduler.deinit();
 
@@ -2712,6 +2743,11 @@ test "save and load roundtrip" {
 }
 
 test "load agent job without command field falls back to prompt" {
+    cron_store_test_mutex.lock();
+    defer cron_store_test_mutex.unlock();
+    try resetCronStoreForTest(std.testing.allocator);
+    defer resetCronStoreForTest(std.testing.allocator) catch {};
+
     var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
     defer scheduler.deinit();
 
@@ -2734,6 +2770,11 @@ test "load agent job without command field falls back to prompt" {
 }
 
 test "load agent job without prompt field falls back to command" {
+    cron_store_test_mutex.lock();
+    defer cron_store_test_mutex.unlock();
+    try resetCronStoreForTest(std.testing.allocator);
+    defer resetCronStoreForTest(std.testing.allocator) catch {};
+
     var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
     defer scheduler.deinit();
 
@@ -2764,6 +2805,11 @@ test "trimOwnedRight duplicates trimmed allocation" {
 }
 
 test "save and load roundtrip keeps delivery account routing" {
+    cron_store_test_mutex.lock();
+    defer cron_store_test_mutex.unlock();
+    try resetCronStoreForTest(std.testing.allocator);
+    defer resetCronStoreForTest(std.testing.allocator) catch {};
+
     var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
     defer scheduler.deinit();
 
@@ -2800,6 +2846,11 @@ test "save and load roundtrip keeps delivery account routing" {
 }
 
 test "cliRunJob persists last status and timestamp" {
+    cron_store_test_mutex.lock();
+    defer cron_store_test_mutex.unlock();
+    try resetCronStoreForTest(std.testing.allocator);
+    defer resetCronStoreForTest(std.testing.allocator) catch {};
+
     var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
     defer scheduler.deinit();
 
@@ -2832,6 +2883,11 @@ test "resolveRunnableCwd returns null for missing cwd" {
 }
 
 test "reloadJobs auto-recovers malformed store and keeps runtime jobs" {
+    cron_store_test_mutex.lock();
+    defer cron_store_test_mutex.unlock();
+    try resetCronStoreForTest(std.testing.allocator);
+    defer resetCronStoreForTest(std.testing.allocator) catch {};
+
     var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
     defer scheduler.deinit();
     _ = try scheduler.addJob("*/10 * * * *", "echo keep");
@@ -2859,6 +2915,11 @@ test "reloadJobs auto-recovers malformed store and keeps runtime jobs" {
 }
 
 test "save and load roundtrip with JSON-sensitive command characters" {
+    cron_store_test_mutex.lock();
+    defer cron_store_test_mutex.unlock();
+    try resetCronStoreForTest(std.testing.allocator);
+    defer resetCronStoreForTest(std.testing.allocator) catch {};
+
     var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
     defer scheduler.deinit();
 
@@ -2875,6 +2936,11 @@ test "save and load roundtrip with JSON-sensitive command characters" {
 }
 
 test "save and load roundtrip keeps agent fields" {
+    cron_store_test_mutex.lock();
+    defer cron_store_test_mutex.unlock();
+    try resetCronStoreForTest(std.testing.allocator);
+    defer resetCronStoreForTest(std.testing.allocator) catch {};
+
     var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
     defer scheduler.deinit();
 

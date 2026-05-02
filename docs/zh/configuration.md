@@ -730,10 +730,27 @@ Max 说明：
 }
 ```
 
+**Tailscale 示例：**
+
+```json
+{
+  "tunnel": {
+    "provider": "tailscale",
+    "tailscale": {
+      "funnel": true,
+      "hostname": "nullclaw.ts.net",
+      "auth_key": "tskey-auth-..."
+    }
+  }
+}
+```
+
 **注意：**
 
 - 隧道会在网关启动前自动启动。
 - 启动后公网 URL 会打印到控制台，同时写入 `daemon_state.json`。
+- `tailscale.auth_key` 是可选项；当你希望启动 `serve`/`funnel` 之前自动执行 `tailscale up` 时再配置它。
+- `cloudflare.token`、`ngrok.auth_token`、`tailscale.auth_key` 这类隧道凭据在 `secrets.encrypt = true` 时会以加密形式落盘。
 
 ### `autonomy`
 

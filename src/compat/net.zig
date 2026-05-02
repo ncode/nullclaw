@@ -499,7 +499,7 @@ test "compat net normalizes listener and stream blocking mode" {
 
     var conn = server.accept() catch |err| switch (err) {
         error.WouldBlock => blk: {
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
             break :blk try server.accept();
         },
         else => return err,

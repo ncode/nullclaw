@@ -919,10 +919,27 @@ Tunnel providers for exposing the gateway to the public internet. Required for w
 }
 ```
 
+**Example: Tailscale**
+
+```json
+{
+  "tunnel": {
+    "provider": "tailscale",
+    "tailscale": {
+      "funnel": true,
+      "hostname": "nullclaw.ts.net",
+      "auth_key": "tskey-auth-..."
+    }
+  }
+}
+```
+
 **Notes:**
 
 - Tunnel starts before gateway.
 - Public URL is printed on startup and written to `daemon_state.json`.
+- `tailscale.auth_key` is optional. Use it when the machine should auto-run `tailscale up` before starting `serve`/`funnel`.
+- Tunnel secrets such as `cloudflare.token`, `ngrok.auth_token`, and `tailscale.auth_key` are encrypted at rest when `secrets.encrypt = true`.
 
 ### `autonomy`
 
