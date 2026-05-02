@@ -87,8 +87,8 @@ const TOP_LEVEL_USAGE = std.fmt.comptimePrint(
     \\
     \\OPTIONS:
     \\  onboard [--interactive] [--api-key KEY] [--provider PROV] [--model MODEL] [--memory MEM]
-    \\  agent [-m MESSAGE] [-s SESSION] [--provider PROVIDER] [--model MODEL] [--temperature TEMP]
-    \\  gateway [--port PORT] [--host HOST]
+    \\  agent [-m MESSAGE] [-s SESSION] [--provider PROVIDER] [--model MODEL] [--temperature TEMP] [--workspace PATH] [--skill SKILL]
+    \\  gateway [--port PORT] [--host HOST] [--workspace PATH]
     \\  status [--json]
     \\  version | --version | -V
     \\  service <{s}>
@@ -292,7 +292,10 @@ fn agentHelpRequested(args: []const []const u8) bool {
             std.mem.eql(u8, arg, "--session") or
             std.mem.eql(u8, arg, "--provider") or
             std.mem.eql(u8, arg, "--model") or
-            std.mem.eql(u8, arg, "--temperature"))
+            std.mem.eql(u8, arg, "--temperature") or
+            std.mem.eql(u8, arg, "--agent") or
+            std.mem.eql(u8, arg, "--workspace") or
+            std.mem.eql(u8, arg, "--skill"))
         {
             if (i + 1 < args.len) i += 1;
         }
@@ -314,7 +317,8 @@ fn gatewayHelpRequested(args: []const []const u8) bool {
         }
         if (std.mem.eql(u8, arg, "--port") or
             std.mem.eql(u8, arg, "-p") or
-            std.mem.eql(u8, arg, "--host"))
+            std.mem.eql(u8, arg, "--host") or
+            std.mem.eql(u8, arg, "--workspace"))
         {
             if (i + 1 < args.len) i += 1;
         }
@@ -334,6 +338,9 @@ fn applyGatewayDaemonOverrides(cfg: *yc.config.Config, sub_args: []const []const
         } else if (std.mem.eql(u8, sub_args[i], "--host") and i + 1 < sub_args.len) {
             i += 1;
             host = sub_args[i];
+        } else if (std.mem.eql(u8, sub_args[i], "--workspace") and i + 1 < sub_args.len) {
+            i += 1;
+            cfg.workspace_dir = sub_args[i];
         }
     }
 
@@ -352,6 +359,7 @@ fn printGatewayUsage() void {
         \\OPTIONS:
         \\  --port PORT, -p PORT   Override gateway listen port
         \\  --host HOST            Override gateway listen host
+        \\  --workspace PATH       Override workspace directory
         \\  --verbose, -v          Enable verbose logging
         \\  --help, -h             Show this help
         \\
@@ -365,7 +373,7 @@ fn printAgentUsage() void {
         \\Start the AI agent loop.
         \\
         \\OPTIONS:
-        \\  invoke --message MESSAGE [--session SESSION] [--json]
+        \\  invoke --message MESSAGE [--session SESSION] [--skill SKILL] [--json]
         \\                               Run one machine-readable agent turn
         \\  sessions list [--json]       List persisted agent sessions
         \\  sessions get <session> [--json]
@@ -379,6 +387,8 @@ fn printAgentUsage() void {
         \\  --provider PROVIDER           Override default provider
         \\  --model MODEL                 Override default model
         \\  --temperature TEMP            Override sampling temperature
+        \\  --workspace PATH              Override workspace directory
+        \\  --skill SKILL                 Activate a named skill at startup
         \\  --verbose, -v                 Enable verbose logging
         \\  --help, -h                    Show this help
         \\
@@ -514,6 +524,48 @@ fn runAgentAdmin(allocator: std.mem.Allocator, sub_args: []const []const u8) !vo
     std_compat.process.exit(1);
 }
 
+const AgentInvokeForwardOptions = struct {
+    provider: ?[]const u8 = null,
+    model: ?[]const u8 = null,
+    temperature: ?[]const u8 = null,
+    agent_name: ?[]const u8 = null,
+    skill_name: ?[]const u8 = null,
+};
+
+fn appendAgentInvokeForwardArgs(
+    allocator: std.mem.Allocator,
+    argv: *std.ArrayListUnmanaged([]const u8),
+    message_text: []const u8,
+    session: []const u8,
+    options: AgentInvokeForwardOptions,
+) !void {
+    try argv.append(allocator, "agent");
+    try argv.append(allocator, "-m");
+    try argv.append(allocator, message_text);
+    try argv.append(allocator, "-s");
+    try argv.append(allocator, session);
+    if (options.provider) |value| {
+        try argv.append(allocator, "--provider");
+        try argv.append(allocator, value);
+    }
+    if (options.model) |value| {
+        try argv.append(allocator, "--model");
+        try argv.append(allocator, value);
+    }
+    if (options.temperature) |value| {
+        try argv.append(allocator, "--temperature");
+        try argv.append(allocator, value);
+    }
+    if (options.agent_name) |value| {
+        try argv.append(allocator, "--agent");
+        try argv.append(allocator, value);
+    }
+    if (options.skill_name) |value| {
+        try argv.append(allocator, "--skill");
+        try argv.append(allocator, value);
+    }
+}
+
 fn runAgentInvokeJson(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
     var message: ?[]const u8 = null;
     var session: ?[]const u8 = null;
@@ -521,6 +573,7 @@ fn runAgentInvokeJson(allocator: std.mem.Allocator, sub_args: []const []const u8
     var model: ?[]const u8 = null;
     var temperature: ?[]const u8 = null;
     var agent_name: ?[]const u8 = null;
+    var skill_name: ?[]const u8 = null;
     var json_mode = false;
 
     var i: usize = 0;
@@ -568,6 +621,13 @@ fn runAgentInvokeJson(allocator: std.mem.Allocator, sub_args: []const []const u8
             }
             i += 1;
             agent_name = sub_args[i];
+        } else if (std.mem.eql(u8, arg, "--skill")) {
+            if (i + 1 >= sub_args.len) {
+                writeJsonError("bad_request", "Missing value for --skill", null);
+                std_compat.process.exit(1);
+            }
+            i += 1;
+            skill_name = sub_args[i];
         } else if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
         } else {
@@ -591,29 +651,15 @@ fn runAgentInvokeJson(allocator: std.mem.Allocator, sub_args: []const []const u8
 
     var argv = std.ArrayListUnmanaged([]const u8).empty;
     defer argv.deinit(allocator);
-    try argv.append(allocator, "agent");
-    try argv.append(allocator, "-m");
-    try argv.append(allocator, message_text);
 
     const effective_session = session orelse "api:default";
-    try argv.append(allocator, "-s");
-    try argv.append(allocator, effective_session);
-    if (provider) |value| {
-        try argv.append(allocator, "--provider");
-        try argv.append(allocator, value);
-    }
-    if (model) |value| {
-        try argv.append(allocator, "--model");
-        try argv.append(allocator, value);
-    }
-    if (temperature) |value| {
-        try argv.append(allocator, "--temperature");
-        try argv.append(allocator, value);
-    }
-    if (agent_name) |value| {
-        try argv.append(allocator, "--agent");
-        try argv.append(allocator, value);
-    }
+    try appendAgentInvokeForwardArgs(allocator, &argv, message_text, effective_session, .{
+        .provider = provider,
+        .model = model,
+        .temperature = temperature,
+        .agent_name = agent_name,
+        .skill_name = skill_name,
+    });
 
     const result = selfCommandResult(allocator, argv.items) catch |err| {
         writeJsonError("agent_invoke_failed", @errorName(err), null);
@@ -3810,7 +3856,7 @@ fn printOnboardUsage() void {
         \\  --api-key KEY     provider API key to persist in config
         \\  --provider PROV   default provider key (e.g. openrouter, anthropic, custom:https://...)
         \\  --model MODEL     default model for the provider (e.g. gpt-5.2, claude-opus-4-6)
-        \\  --memory MEM      memory backend key (e.g. markdown, sqlite, memory)
+        \\  --memory MEM      memory backend key (e.g. markdown, sqlite, kg, memory)
         \\
         \\Examples:
         \\  nullclaw onboard --api-key sk-... --provider openrouter
@@ -5168,6 +5214,36 @@ test "agentHelpRequested ignores session value that matches short help flag" {
     try std.testing.expect(!agentHelpRequested(&args));
 }
 
+test "agentHelpRequested ignores workspace value that matches help flag" {
+    const args = [_][]const u8{ "--workspace", "--help" };
+    try std.testing.expect(!agentHelpRequested(&args));
+}
+
+test "agentHelpRequested ignores agent value that matches help flag" {
+    const args = [_][]const u8{ "--agent", "--help" };
+    try std.testing.expect(!agentHelpRequested(&args));
+}
+
+test "agentHelpRequested ignores skill value that matches help flag" {
+    const args = [_][]const u8{ "--skill", "-h" };
+    try std.testing.expect(!agentHelpRequested(&args));
+}
+
+test "appendAgentInvokeForwardArgs forwards skill option" {
+    var argv = std.ArrayListUnmanaged([]const u8).empty;
+    defer argv.deinit(std.testing.allocator);
+
+    try appendAgentInvokeForwardArgs(std.testing.allocator, &argv, "hello", "api:default", .{
+        .skill_name = "news-digest",
+    });
+
+    const expected = [_][]const u8{ "agent", "-m", "hello", "-s", "api:default", "--skill", "news-digest" };
+    try std.testing.expectEqual(expected.len, argv.items.len);
+    for (expected, argv.items) |want, got| {
+        try std.testing.expectEqualStrings(want, got);
+    }
+}
+
 test "gatewayHelpRequested detects standalone help flag" {
     const args = [_][]const u8{ "--port", "8080", "--help" };
     try std.testing.expect(gatewayHelpRequested(&args));
@@ -5303,6 +5379,24 @@ test "applyGatewayDaemonOverrides rejects invalid port" {
     };
     const args = [_][]const u8{ "--port", "bad" };
     try std.testing.expectError(error.InvalidPort, applyGatewayDaemonOverrides(&cfg, &args));
+}
+
+test "applyGatewayDaemonOverrides applies workspace override" {
+    var cfg = yc.config.Config{
+        .workspace_dir = "/tmp/nullclaw-test",
+        .config_path = "/tmp/nullclaw-test/config.json",
+        .default_model = "openrouter/auto",
+        .allocator = std.testing.allocator,
+    };
+    const args = [_][]const u8{ "--workspace", "/custom/workspace" };
+    try applyGatewayDaemonOverrides(&cfg, &args);
+    try std.testing.expectEqualStrings("/custom/workspace", cfg.workspace_dir);
+}
+
+test "gatewayHelpRequested skips workspace value" {
+    // --help here is the value of --workspace, not a real flag — should not trigger help
+    const args = [_][]const u8{ "--workspace", "--help" };
+    try std.testing.expect(!gatewayHelpRequested(&args));
 }
 
 test "hasConfiguredStartableChannels ignores cli and webhook-only defaults" {

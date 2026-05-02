@@ -47,6 +47,7 @@ const ToolExecutionResult = dispatcher.ToolExecutionResult;
 
 /// Maximum agentic tool-use iterations per user message.
 const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 25;
+const MAX_MID_TURN_INJECTION_FOLLOWUPS: u32 = 8;
 
 /// Maximum non-system messages before trimming.
 const DEFAULT_MAX_HISTORY: u32 = 50;
@@ -54,6 +55,30 @@ const DEFAULT_MAX_HISTORY: u32 = 50;
 pub fn estimate_text_tokens(text: []const u8) u32 {
     return @intCast((text.len + 3) / 4);
 }
+
+// ─── Progress hints ──────────────────────────────────────────────────────────
+
+/// Progress hint emitted during a turn. For tool-call starts, text is the tool name.
+pub const ProgressHint = struct {
+    text: []const u8,
+};
+
+/// Callback invoked for each progress hint. Same lifetime rules as StreamCallback.
+pub const ProgressCallback = *const fn (ctx: *anyopaque, hint: ProgressHint) void;
+
+/// Sink wrapping a ProgressCallback + context pointer.
+pub const ProgressSink = struct {
+    callback: ProgressCallback,
+    ctx: *anyopaque,
+
+    pub fn emit(self: ProgressSink, hint: ProgressHint) void {
+        self.callback(self.ctx, hint);
+    }
+};
+
+/// Callback invoked at each tool-loop boundary to drain a pending mid-turn injection.
+/// Returns an owned slice allocated with the provided allocator, or null if empty.
+pub const DrainCallback = *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!?[]u8;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Agent
@@ -151,7 +176,7 @@ pub const Agent = struct {
         }
     };
 
-    const QueueMode = enum {
+    pub const QueueMode = enum {
         off,
         serial,
         latest,
@@ -336,6 +361,16 @@ pub const Agent = struct {
     stream_callback: ?providers.StreamCallback = null,
     /// Context pointer passed to stream_callback.
     stream_ctx: ?*anyopaque = null,
+    /// Optional progress hint callback. When set, called on tool_call_start events.
+    progress_callback: ?ProgressCallback = null,
+    /// Context pointer passed to progress_callback.
+    progress_ctx: ?*anyopaque = null,
+    /// Optional mid-turn injection drain. When set, called at each tool-loop boundary
+    /// to pull a pending user message and fold it into the active turn.
+    /// Returns an owned slice (allocated with the agent allocator) or null if empty.
+    drain_injection_cb: ?DrainCallback = null,
+    /// Context pointer passed to drain_injection_cb.
+    drain_injection_ctx: ?*anyopaque = null,
     /// Optional callback invoked for each LLM response usage record.
     usage_record_callback: ?UsageRecordCallback = null,
     /// Context pointer passed to usage_record_callback.
@@ -403,6 +438,15 @@ pub const Agent = struct {
             msg.deinit(self.allocator);
             return err;
         };
+    }
+
+    fn drainPendingInjection(self: *Agent) !?[]u8 {
+        if (self.drain_injection_cb) |drain_cb| {
+            if (self.drain_injection_ctx) |drain_ctx| {
+                return try drain_cb(drain_ctx, self.allocator);
+            }
+        }
+        return null;
     }
 
     /// Initialize agent from a loaded Config.
@@ -1935,13 +1979,19 @@ pub const Agent = struct {
         defer iter_arena.deinit();
 
         var iteration: u32 = 0;
+        var injection_followups: u32 = 0;
         var forced_follow_through_count: u32 = 0;
         var empty_response_retry_count: u32 = 0;
         var seen_tool_call_results: std.AutoHashMapUnmanaged(u64, CachedToolCallResult) = .empty;
         defer deinitSeenToolCallResults(self.allocator, &seen_tool_call_results);
-        while (iteration < self.max_tool_iterations) : (iteration += 1) {
+        while (iteration < self.max_tool_iterations +| injection_followups) : (iteration += 1) {
             if (self.isInterruptRequested()) {
                 return self.interruptedReply();
+            }
+
+            // Drain any mid-turn injection at each tool boundary.
+            if (try self.drainPendingInjection()) |injected| {
+                try self.appendOwnedHistoryMessage(.{ .role = .user, .content = injected });
             }
 
             _ = iter_arena.reset(.retain_capacity);
@@ -2343,6 +2393,23 @@ pub const Agent = struct {
                     continue;
                 }
 
+                // If an inbound message arrived while the final model response
+                // was being produced, fold it into this active turn instead of
+                // leaving it buffered until an unrelated future message.
+                if (injection_followups < MAX_MID_TURN_INJECTION_FOLLOWUPS) {
+                    if (try self.drainPendingInjection()) |injected| {
+                        try self.appendOwnedHistoryMessage(.{
+                            .role = .assistant,
+                            .content = try self.allocator.dupe(u8, display_text),
+                        });
+                        try self.appendOwnedHistoryMessage(.{ .role = .user, .content = injected });
+                        self.trimHistory();
+                        self.freeResponseFields(&response);
+                        injection_followups += 1;
+                        continue;
+                    }
+                }
+
                 // No tool calls — final response
                 const base_text = if (self.context_was_compacted) blk: {
                     self.context_was_compacted = false;
@@ -2463,6 +2530,9 @@ pub const Agent = struct {
 
                 const tool_start_event = ObserverEvent{ .tool_call_start = .{ .tool = call.name } };
                 self.observer.recordEvent(&tool_start_event);
+                if (self.progress_callback) |cb| {
+                    if (self.progress_ctx) |pctx| cb(pctx, .{ .text = call.name });
+                }
 
                 const tool_timer = std_compat.time.milliTimestamp();
                 const result = blk: {
@@ -7584,6 +7654,8 @@ test "Agent streaming fields default to null" {
 
     try std.testing.expect(agent.stream_callback == null);
     try std.testing.expect(agent.stream_ctx == null);
+    try std.testing.expect(agent.progress_callback == null);
+    try std.testing.expect(agent.progress_ctx == null);
 }
 
 // ── Bug regression tests ─────────────────────────────────────────

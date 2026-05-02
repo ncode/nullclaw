@@ -773,6 +773,10 @@ fn handleTelegramInteractiveCallback(
             return false;
         }
 
+        if (runtime.session_mgr.routeInbound(session_key, content) == .skip) {
+            return true;
+        }
+
         const model_reply = runtime.session_mgr.processMessage(session_key, content, conversation_context) catch |err| {
             log.err("failed to process telegram callback interaction: {}", .{err});
             response_owned = true;
@@ -976,8 +980,10 @@ fn processTelegramMessage(
     };
     const sink = tg_ptr.makeSink(&stream_ctx);
 
+    if (runtime.session_mgr.routeInbound(session_key, content) == .skip) return;
+
     tg_ptr.setTaskReaction(sender, message_id, .running);
-    const reply = runtime.session_mgr.processMessageStreaming(session_key, content, conversation_context, sink) catch |err| {
+    const reply = runtime.session_mgr.processMessageStreaming(session_key, content, conversation_context, sink, null) catch |err| {
         logAgentProcessingError(allocator, "Agent error", err);
         tg_ptr.setTaskReaction(sender, message_id, .failed);
         const owned_err_msg = detailedProviderErrorForDisplay(allocator, err) catch null;
@@ -1616,6 +1622,13 @@ pub fn runTelegramLoop(
                         break :parallel_attempt;
                     }
 
+                    if (active_worker_threads.get(session_key) != null and
+                        runtime.session_mgr.routeInbound(session_key, msg.content) == .skip)
+                    {
+                        handled_in_worker = true;
+                        break :parallel_attempt;
+                    }
+
                     // Preserve message order per session_key.
                     if (active_worker_threads.fetchRemove(session_key)) |entry| {
                         var idx: usize = 0;
@@ -1881,6 +1894,8 @@ pub fn runSignalLoop(
                 break :blk route.session_key;
             };
 
+            if (runtime.session_mgr.routeInbound(session_key, msg.content) == .skip) continue;
+
             const typing_target = msg.reply_target;
             if (typing_target) |target| sg_ptr.startTyping(target) catch {};
             defer if (typing_target) |target| sg_ptr.stopTyping(target) catch {};
@@ -1991,6 +2006,8 @@ pub fn runWeixinLoop(
                 routed_session_key = route.session_key;
                 break :blk route.session_key;
             };
+
+            if (runtime.session_mgr.routeInbound(session_key, msg.content) == .skip) continue;
 
             const conversation_context = buildConversationContext(.{
                 .channel = "weixin",
@@ -2245,6 +2262,8 @@ pub fn runMatrixLoop(
                 break :blk route.session_key;
             };
 
+            if (runtime.session_mgr.routeInbound(session_key, msg.content) == .skip) continue;
+
             const typing_target = msg.reply_target orelse msg.sender;
             mx_ptr.startTyping(typing_target) catch {};
             defer mx_ptr.stopTyping(typing_target) catch {};
@@ -2252,7 +2271,7 @@ pub fn runMatrixLoop(
             const conversation_context = buildConversationContext(.{
                 .channel = "matrix",
                 .account_id = mx_ptr.account_id,
-                .delivery_chat_id = typing_target,
+                .delivery_chat_id = msg.reply_target orelse msg.sender,
                 .peer_id = if (msg.is_group) room_peer_id else msg.sender,
                 .is_group = msg.is_group,
                 .group_id = if (msg.is_group) room_peer_id else null,
@@ -2391,6 +2410,8 @@ pub fn runMaxLoop(
                 break :blk route.session_key;
             };
 
+            if (runtime.session_mgr.routeInbound(session_key, msg.content) == .skip) continue;
+
             mx_ptr.startTyping(reply_target) catch {};
             defer mx_ptr.stopTyping(reply_target) catch {};
 
@@ -2409,7 +2430,7 @@ pub fn runMaxLoop(
             };
             const sink = mx_ptr.makeSink(&stream_ctx);
 
-            const reply = runtime.session_mgr.processMessageStreaming(session_key, msg.content, conversation_context, sink) catch |err| {
+            const reply = runtime.session_mgr.processMessageStreaming(session_key, msg.content, conversation_context, sink, null) catch |err| {
                 logAgentProcessingError(allocator, "Max agent error", err);
                 const owned_err_msg = detailedProviderErrorForDisplay(allocator, err) catch null;
                 defer if (owned_err_msg) |owned_msg| allocator.free(owned_msg);
