@@ -16,7 +16,6 @@ const channel_catalog = @import("channel_catalog.zig");
 const daemon = @import("daemon.zig");
 const cron = @import("cron.zig");
 const fs_compat = @import("fs_compat.zig");
-const builtin = @import("builtin");
 const health = @import("health.zig");
 const json_util = @import("json_util.zig");
 const admin_output = @import("admin_output.zig");
@@ -24,6 +23,7 @@ const version = @import("version.zig");
 const bootstrap_mod = @import("bootstrap/root.zig");
 const BootstrapProvider = bootstrap_mod.BootstrapProvider;
 const memory_root = @import("memory/root.zig");
+const terminal_color = @import("terminal_color.zig");
 
 /// Staleness thresholds (seconds).
 const DAEMON_STALE_SECONDS: i64 = 30;
@@ -35,50 +35,10 @@ const NO_NON_CLI_CHANNELS_CONFIGURED_MESSAGE = "no non-CLI channels configured -
 const CLI_ALWAYS_AVAILABLE_MESSAGE = "CLI always available";
 // ── ANSI color support ──────────────────────────────────────────
 
-extern "kernel32" fn GetStdHandle(nStdHandle: std.os.windows.DWORD) callconv(.winapi) ?std.os.windows.HANDLE;
-extern "kernel32" fn GetConsoleMode(
-    hConsoleHandle: std.os.windows.HANDLE,
-    lpMode: *std.os.windows.DWORD,
-) callconv(.winapi) std.os.windows.BOOL;
-extern "kernel32" fn SetConsoleMode(
-    hConsoleHandle: std.os.windows.HANDLE,
-    dwMode: std.os.windows.DWORD,
-) callconv(.winapi) std.os.windows.BOOL;
-const STD_OUTPUT_HANDLE: std.os.windows.DWORD = @bitCast(@as(i32, -11));
-
-const Color = struct {
-    const reset = "\x1b[0m";
-    const green = "\x1b[32m";
-    const yellow = "\x1b[33m";
-    const red = "\x1b[31m";
-};
+const Color = terminal_color.Color;
 
 pub fn shouldColorize(file: std_compat.fs.File) bool {
-    // Respect NO_COLOR convention (https://no-color.org/)
-    if (comptime builtin.os.tag != .windows and builtin.link_libc) {
-        if (std.c.getenv("NO_COLOR")) |_| return false;
-    }
-
-    // Never colorize if stdout is redirected to a file/pipe
-    if (!file.isTty()) return false;
-
-    // On Windows, attempt to enable Virtual Terminal Processing.
-    // If that fails, fall back to no color.
-    if (builtin.os.tag == .windows) {
-        return enableWindowsVT100() catch false;
-    }
-
-    return true;
-}
-
-/// Windows-specific: enable ENABLE_VIRTUAL_TERMINAL_PROCESSING on stdout.
-fn enableWindowsVT100() !bool {
-    const windows = std.os.windows;
-    const handle = GetStdHandle(STD_OUTPUT_HANDLE) orelse return false;
-    var mode: windows.DWORD = 0;
-    if (GetConsoleMode(handle, &mode) == .FALSE) return false;
-    mode |= 0x0004; // ENABLE_VIRTUAL_TERMINAL_PROCESSING
-    return SetConsoleMode(handle, mode) != .FALSE;
+    return terminal_color.shouldColorize(file);
 }
 
 // ── Diagnostic types ────────────────────────────────────────────

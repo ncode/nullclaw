@@ -3,17 +3,12 @@ const build_options = @import("build_options");
 const channel_catalog = @import("channel_catalog.zig");
 const config_mod = @import("config.zig");
 const memory_registry = @import("memory/engines/registry.zig");
+const terminal_color = @import("terminal_color.zig");
 const tools_mod = @import("tools/root.zig");
 
 const Config = config_mod.Config;
 const Tool = tools_mod.Tool;
-
-const Color = struct {
-    const reset = "\x1b[0m";
-    const green = "\x1b[32m";
-    const yellow = "\x1b[33m";
-    const red = "\x1b[31m";
-};
+const Color = terminal_color.Color;
 
 const core_tool_names = [_][]const u8{
     "shell",
