@@ -39,6 +39,7 @@ const streaming = @import("streaming.zig");
 const thread_stacks = @import("thread_stacks.zig");
 const log = std.log.scoped(.session);
 const MESSAGE_LOG_MAX_BYTES: usize = 4096;
+const MAX_POST_TURN_INJECTION_DRAINS: u32 = 8;
 const TOKEN_USAGE_LEDGER_FILENAME = "llm_token_usage.jsonl";
 const NS_PER_SEC: i128 = std.time.ns_per_s;
 const RUNTIME_COMMAND_ROLE = memory_mod.RUNTIME_COMMAND_ROLE;
@@ -201,6 +202,21 @@ pub const Session = struct {
         self.injection_pending = duped;
     }
 
+    /// Deposit text only if a turn is still running after the injection lock is held.
+    pub fn injectMidTurnIfRunning(self: *Session, allocator: Allocator, text: []const u8) !bool {
+        if (!self.turn_running.load(.acquire)) return false;
+        const duped = try allocator.dupe(u8, text);
+        self.injection_mu.lock();
+        defer self.injection_mu.unlock();
+        if (!self.turn_running.load(.acquire)) {
+            allocator.free(duped);
+            return false;
+        }
+        if (self.injection_pending) |old| allocator.free(old);
+        self.injection_pending = duped;
+        return true;
+    }
+
     /// Returns true if there is a pending injection.
     pub fn hasInjection(self: *Session) bool {
         self.injection_mu.lock();
@@ -208,15 +224,17 @@ pub const Session = struct {
         return self.injection_pending != null;
     }
 
-    fn drainInjection(self: *Session, owner_allocator: Allocator, target_allocator: Allocator) ?[]u8 {
+    /// Drain and duplicate the pending injection into dst_allocator.
+    /// On allocation failure the pending message stays buffered for a later retry.
+    pub fn drainInjection(self: *Session, sm_allocator: Allocator, dst_allocator: Allocator) !?[]u8 {
         self.injection_mu.lock();
         defer self.injection_mu.unlock();
 
         const pending = self.injection_pending orelse return null;
-        const drained = target_allocator.dupe(u8, pending) catch return null;
-        owner_allocator.free(pending);
+        const duped = try dst_allocator.dupe(u8, pending);
+        sm_allocator.free(pending);
         self.injection_pending = null;
-        return drained;
+        return duped;
     }
 };
 
@@ -1633,6 +1651,30 @@ pub const SessionManager = struct {
         return self.processMessageStreaming(session_key, content, conversation_context, null, null);
     }
 
+    fn lockSessionForTurn(session: *Session) void {
+        session.mutex.lock();
+    }
+
+    /// Route and process an inbound message. Returns null when routing consumed
+    /// the message via drop/injection and the caller should not send a reply.
+    pub fn processInboundMessage(self: *SessionManager, session_key: []const u8, content: []const u8, conversation_context: ?ConversationContext) !?[]const u8 {
+        if (self.routeInbound(session_key, content) == .skip) return null;
+        return try self.processMessage(session_key, content, conversation_context);
+    }
+
+    /// Streaming variant of processInboundMessage.
+    pub fn processInboundMessageStreaming(
+        self: *SessionManager,
+        session_key: []const u8,
+        content: []const u8,
+        conversation_context: ?ConversationContext,
+        stream_sink: ?streaming.Sink,
+        progress_sink: ?agent_mod.ProgressSink,
+    ) !?[]const u8 {
+        if (self.routeInbound(session_key, content) == .skip) return null;
+        return try self.processMessageStreaming(session_key, content, conversation_context, stream_sink, progress_sink);
+    }
+
     /// Handle a slash command against the live session without invoking the LLM turn loop.
     /// Used for transport-driven local UIs such as Telegram callback menus.
     pub fn handleLocalSlashCommand(
@@ -1643,7 +1685,7 @@ pub const SessionManager = struct {
     ) !?[]const u8 {
         const session = try self.getOrCreate(session_key);
 
-        session.mutex.lock();
+        lockSessionForTurn(session);
         defer session.mutex.unlock();
         session.turn_running.store(true, .release);
         defer {
@@ -1724,7 +1766,7 @@ pub const SessionManager = struct {
 
         const session = try self.getOrCreate(session_key);
 
-        session.mutex.lock();
+        lockSessionForTurn(session);
         defer session.mutex.unlock();
         session.turn_running.store(true, .release);
         defer {
@@ -1772,7 +1814,7 @@ pub const SessionManager = struct {
             session: *Session,
             sm_allocator: Allocator,
 
-            fn callback(ctx: *anyopaque, agent_alloc: std.mem.Allocator) ?[]u8 {
+            fn callback(ctx: *anyopaque, agent_alloc: std.mem.Allocator) !?[]u8 {
                 const dc: *@This() = @ptrCast(@alignCast(ctx));
                 return dc.session.drainInjection(dc.sm_allocator, agent_alloc);
             }
@@ -1796,8 +1838,27 @@ pub const SessionManager = struct {
         } };
         session.agent.observer.recordEvent(&start_event);
 
-        const response = try session.agent.turn(content);
-        session.turn_count += 1;
+        var response = try session.agent.turn(content);
+        var completed_turns: u64 = 1;
+
+        var late_drain_count: u32 = 0;
+        while (late_drain_count < MAX_POST_TURN_INJECTION_DRAINS) : (late_drain_count += 1) {
+            const late_content = (try session.drainInjection(self.allocator, self.allocator)) orelse break;
+            defer self.allocator.free(late_content);
+
+            const previous_response = response;
+            response = session.agent.turn(late_content) catch |err| {
+                self.allocator.free(previous_response);
+                return err;
+            };
+            self.allocator.free(previous_response);
+            completed_turns += 1;
+        }
+        if (late_drain_count == MAX_POST_TURN_INJECTION_DRAINS and session.hasInjection()) {
+            log.warn("post-turn injection drain limit reached session=0x{x}", .{session_hash});
+        }
+
+        session.turn_count += completed_turns;
         session.last_active = std_compat.time.timestamp();
 
         // Track consolidation timestamp
@@ -1840,7 +1901,7 @@ pub const SessionManager = struct {
         }
     };
 
-    /// Return the routing input for a session without acquiring session.mutex.
+    /// Return the routing input for a session without acquiring the long turn mutex.
     /// If the session does not exist yet, returns defaults (process, off, false).
     pub fn routeInput(self: *SessionManager, session_key: []const u8) inbound_router.RouteInput {
         self.mutex.lock();
@@ -1867,6 +1928,47 @@ pub const SessionManager = struct {
             break :blk self.sessions.get(session_key) orelse return;
         };
         try session.injectMidTurn(self.allocator, text);
+    }
+
+    /// Deposit a mid-turn injection only if the session is still running.
+    fn injectMidTurnIfRunning(self: *SessionManager, session_key: []const u8, text: []const u8) !bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const session = self.sessions.get(session_key) orelse return false;
+        return try session.injectMidTurnIfRunning(self.allocator, text);
+    }
+
+    fn isSessionTurnRunning(self: *SessionManager, session_key: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const session = self.sessions.get(session_key) orelse return false;
+        return session.turn_running.load(.acquire);
+    }
+
+    pub const InboundRouteAction = enum {
+        process,
+        skip,
+    };
+
+    /// Apply inbound routing side effects for a message.
+    /// Returns .skip when the caller should not start a new turn.
+    pub fn routeInbound(self: *SessionManager, session_key: []const u8, content: []const u8) InboundRouteAction {
+        const session_hash = std.hash.Wyhash.hash(0, session_key);
+        return switch (inbound_router.route(self.routeInput(session_key))) {
+            .inject, .replace_injection => blk: {
+                const injected = self.injectMidTurnIfRunning(session_key, content) catch |err| {
+                    log.warn("mid-turn inject failed session=0x{x} err={}", .{ session_hash, err });
+                    break :blk .process;
+                };
+                break :blk if (injected) .skip else .process;
+            },
+            .drop => blk: {
+                if (!self.isSessionTurnRunning(session_key)) break :blk .process;
+                log.info("dropping message: session busy queue_mode=off session=0x{x}", .{session_hash});
+                break :blk .skip;
+            },
+            .process, .queue => .process,
+        };
     }
 
     pub const SessionSnapshot = struct {
@@ -2248,6 +2350,79 @@ const CaptureMessagesProvider = struct {
 
     fn getName(_: *anyopaque) []const u8 {
         return "capture_messages";
+    }
+
+    fn deinitFn(_: *anyopaque) void {}
+};
+
+const LateInjectionProvider = struct {
+    session_mgr: *SessionManager,
+    session_key: []const u8,
+    chat_calls: usize = 0,
+    route_action: ?SessionManager.InboundRouteAction = null,
+    user_count: usize = 0,
+    user_lens: [4]usize = [_]usize{0} ** 4,
+    user_bufs: [4][128]u8 = undefined,
+
+    const vtable = Provider.VTable{
+        .chatWithSystem = chatWithSystem,
+        .chat = chat,
+        .supportsNativeTools = supportsNativeTools,
+        .getName = getName,
+        .deinit = deinitFn,
+    };
+
+    fn provider(self: *LateInjectionProvider) Provider {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+    }
+
+    fn chatWithSystem(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        _: ?[]const u8,
+        _: []const u8,
+        _: []const u8,
+        _: f64,
+    ) anyerror![]const u8 {
+        const self: *LateInjectionProvider = @ptrCast(@alignCast(ptr));
+        return allocator.dupe(u8, if (self.chat_calls == 0) "first response" else "final response");
+    }
+
+    fn chat(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        request: providers.ChatRequest,
+        _: []const u8,
+        _: f64,
+    ) anyerror!providers.ChatResponse {
+        const self: *LateInjectionProvider = @ptrCast(@alignCast(ptr));
+        self.chat_calls += 1;
+        self.user_count = 0;
+        for (request.messages) |message| {
+            if (message.role != .user or self.user_count >= self.user_bufs.len) continue;
+            const idx = self.user_count;
+            const len = @min(message.content.len, self.user_bufs[idx].len);
+            @memcpy(self.user_bufs[idx][0..len], message.content[0..len]);
+            self.user_lens[idx] = len;
+            self.user_count += 1;
+        }
+        if (self.chat_calls == 1) {
+            self.route_action = self.session_mgr.routeInbound(self.session_key, "late message");
+            return .{ .content = try allocator.dupe(u8, "first response") };
+        }
+        return .{ .content = try allocator.dupe(u8, "final response") };
+    }
+
+    fn userMessage(self: *const LateInjectionProvider, idx: usize) []const u8 {
+        return self.user_bufs[idx][0..self.user_lens[idx]];
+    }
+
+    fn supportsNativeTools(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn getName(_: *anyopaque) []const u8 {
+        return "late_injection";
     }
 
     fn deinitFn(_: *anyopaque) void {}
@@ -3705,6 +3880,41 @@ test "session has correct initial state" {
     try testing.expectEqual(@as(usize, 0), s.agent.historyLen());
 }
 
+test "routeInbound handles active session routing side effects" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    const session_key = "route:active";
+    const session = try sm.getOrCreate(session_key);
+    session.turn_running.store(true, .release);
+    defer session.turn_running.store(false, .release);
+
+    session.agent.queue_mode = .latest;
+    try testing.expectEqual(
+        SessionManager.InboundRouteAction.skip,
+        sm.routeInbound(session_key, "latest message"),
+    );
+    try testing.expect(sm.routeInput(session_key).has_pending_injection);
+    const drained = (try session.drainInjection(sm.allocator, testing.allocator)).?;
+    defer testing.allocator.free(drained);
+    try testing.expectEqualStrings("latest message", drained);
+
+    session.agent.queue_mode = .off;
+    try testing.expectEqual(
+        SessionManager.InboundRouteAction.skip,
+        sm.routeInbound(session_key, "drop message"),
+    );
+    try testing.expect(!sm.routeInput(session_key).has_pending_injection);
+
+    session.agent.queue_mode = .serial;
+    try testing.expectEqual(
+        SessionManager.InboundRouteAction.process,
+        sm.routeInbound(session_key, "queued message"),
+    );
+}
+
 test "requestTurnInterrupt signals only active sessions" {
     var mock = MockProvider{ .response = "ok" };
     const cfg = testConfig();
@@ -3746,6 +3956,59 @@ test "requestTurnInterrupt returns active tool snapshot when available" {
     try testing.expectEqualStrings("shell", res.active_tool.?);
 }
 
+test "lockSessionForTurn waits without interrupting active serial turn" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    const session = try sm.getOrCreate("interrupt:contention");
+    session.turn_running.store(true, .release);
+    defer session.turn_running.store(false, .release);
+    session.agent.clearInterruptRequest();
+
+    session.mutex.lock();
+    var session_unlocked = false;
+    defer if (!session_unlocked) session.mutex.unlock();
+
+    const Worker = struct {
+        const Ctx = struct {
+            session: *Session,
+            started: *std.atomic.Value(bool),
+        };
+
+        fn run(ctx: Ctx) void {
+            ctx.started.store(true, .release);
+            SessionManager.lockSessionForTurn(ctx.session);
+            ctx.session.mutex.unlock();
+        }
+    };
+
+    var worker_started = std.atomic.Value(bool).init(false);
+    const ctx = Worker.Ctx{ .session = session, .started = &worker_started };
+    var thread = try std.Thread.spawn(.{}, Worker.run, .{ctx});
+    var thread_joined = false;
+    defer if (!thread_joined) thread.join();
+
+    var attempts: usize = 0;
+    while (attempts < 100 and !worker_started.load(.acquire)) : (attempts += 1) {
+        std_compat.thread.sleep(2 * std.time.ns_per_ms);
+    }
+    try testing.expect(worker_started.load(.acquire));
+
+    attempts = 0;
+    while (attempts < 20) : (attempts += 1) {
+        std_compat.thread.sleep(2 * std.time.ns_per_ms);
+    }
+    // Regression (#832): serial queued turns must wait behind active turns without hard-stopping them.
+    try testing.expect(!session.agent.interrupt_requested.load(.acquire));
+
+    session.mutex.unlock();
+    session_unlocked = true;
+    thread.join();
+    thread_joined = true;
+}
+
 // ---------------------------------------------------------------------------
 // 2. processMessage tests
 // ---------------------------------------------------------------------------
@@ -3759,6 +4022,54 @@ test "processMessage returns mock response" {
     const resp = try sm.processMessage("user:1", "hi", null);
     defer testing.allocator.free(resp);
     try testing.expectEqualStrings("Hello from mock", resp);
+}
+
+test "routeInput reports pending mid-turn injection" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    const session_key = "inject:route";
+    const session = try sm.getOrCreate(session_key);
+    session.agent.queue_mode = .latest;
+    session.turn_running.store(true, .release);
+    defer session.turn_running.store(false, .release);
+
+    try testing.expectEqual(inbound_router.RoutingDecision.inject, inbound_router.route(sm.routeInput(session_key)));
+
+    // Regression: shells rely on has_pending_injection to replace latest-mode
+    // input instead of accumulating stale pending messages.
+    try sm.injectMidTurn(session_key, "first pending");
+    try testing.expectEqual(inbound_router.RoutingDecision.replace_injection, inbound_router.route(sm.routeInput(session_key)));
+}
+
+test "processMessageStreaming drains pending mid-turn injection into turn history" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    const session_key = "inject:drain";
+    _ = try sm.getOrCreate(session_key);
+    try sm.injectMidTurn(session_key, "mid-turn note");
+
+    const resp = try sm.processMessageStreaming(session_key, "hello", null, null, null);
+    defer testing.allocator.free(resp);
+
+    const session = try sm.getOrCreate(session_key);
+    try testing.expect(!sm.routeInput(session_key).has_pending_injection);
+    var saw_initial = false;
+    var saw_injected = false;
+    for (session.agent.history.items) |entry| {
+        if (entry.role != .user) continue;
+        if (std.mem.eql(u8, entry.content, "hello")) saw_initial = true;
+        if (std.mem.eql(u8, entry.content, "mid-turn note")) saw_injected = true;
+    }
+    // Regression: pending injections must be owned by the agent history after
+    // drain so Session.deinit has no stale buffer and the next turn cannot see it.
+    try testing.expect(saw_initial);
+    try testing.expect(saw_injected);
 }
 
 test "processMessageStreaming forwards provider deltas" {
@@ -3858,7 +4169,7 @@ test "routeInput observes pending mid-turn injection" {
     try testing.expect(input.has_pending_injection);
     try testing.expectEqual(inbound_router.RoutingDecision.replace_injection, inbound_router.route(input));
 
-    const drained = session.drainInjection(testing.allocator, testing.allocator) orelse return error.TestExpectedEqual;
+    const drained = (try session.drainInjection(testing.allocator, testing.allocator)) orelse return error.TestExpectedEqual;
     defer testing.allocator.free(drained);
     try testing.expectEqualStrings("second", drained);
     try testing.expect(!session.hasInjection());
@@ -3878,13 +4189,34 @@ test "drainInjection preserves pending message when target allocation fails" {
 
     // Regression: a transient allocation failure in the agent allocator must not
     // drop the pending injection before a later tool-loop boundary can retry it.
-    try testing.expect(session.drainInjection(testing.allocator, failing.allocator()) == null);
+    try testing.expectError(error.OutOfMemory, session.drainInjection(testing.allocator, failing.allocator()));
     try testing.expect(session.hasInjection());
 
-    const drained = session.drainInjection(testing.allocator, testing.allocator) orelse return error.TestExpectedEqual;
+    const drained = (try session.drainInjection(testing.allocator, testing.allocator)) orelse return error.TestExpectedEqual;
     defer testing.allocator.free(drained);
     try testing.expectEqualStrings("keep me", drained);
     try testing.expect(!session.hasInjection());
+}
+
+test "injectMidTurnIfRunning refuses stopped sessions" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    const session = try sm.getOrCreate("inject:stopped");
+
+    // Regression: if routeInbound observed a running turn but the turn stopped
+    // before deposit, the message must fall back to normal processing.
+    try testing.expect(!try session.injectMidTurnIfRunning(testing.allocator, "stale"));
+    try testing.expect(!session.hasInjection());
+
+    session.turn_running.store(true, .release);
+    defer session.turn_running.store(false, .release);
+    try testing.expect(try session.injectMidTurnIfRunning(testing.allocator, "active"));
+    const drained = (try session.drainInjection(testing.allocator, testing.allocator)) orelse return error.TestExpectedEqual;
+    defer testing.allocator.free(drained);
+    try testing.expectEqualStrings("active", drained);
 }
 
 test "processMessageStreaming drains pending mid-turn injection into provider messages" {
@@ -3918,6 +4250,45 @@ test "processMessageStreaming drains pending mid-turn injection into provider me
     try testing.expectEqualStrings("mid turn", provider.userMessage(1));
     const session = try sm.getOrCreate(session_key);
     try testing.expect(!session.hasInjection());
+}
+
+test "processMessageStreaming drains late injection before completing turn" {
+    const cfg = testConfig();
+    var noop = observability.NoopObserver{};
+    const session_key = "inject:late";
+    var provider = LateInjectionProvider{
+        .session_mgr = undefined,
+        .session_key = session_key,
+    };
+    var sm = SessionManager.init(
+        testing.allocator,
+        &cfg,
+        provider.provider(),
+        &.{},
+        null,
+        noop.observer(),
+        null,
+        null,
+    );
+    defer sm.deinit();
+    provider.session_mgr = &sm;
+
+    const session = try sm.getOrCreate(session_key);
+    session.agent.queue_mode = .latest;
+
+    const resp = try sm.processMessage(session_key, "initial", null);
+    defer testing.allocator.free(resp);
+
+    // Regression: injection arriving after the first provider request but before
+    // turn teardown must not stay pending for a future unrelated message.
+    try testing.expectEqualStrings("final response", resp);
+    try testing.expectEqual(SessionManager.InboundRouteAction.skip, provider.route_action.?);
+    try testing.expectEqual(@as(usize, 2), provider.chat_calls);
+    try testing.expectEqual(@as(usize, 2), provider.user_count);
+    try testing.expectEqualStrings("initial", provider.userMessage(0));
+    try testing.expectEqualStrings("late message", provider.userMessage(1));
+    try testing.expect(!session.hasInjection());
+    try testing.expectEqual(@as(u64, 1), session.turn_count);
 }
 
 test "processMessage refreshes system prompt when conversation context is cleared" {

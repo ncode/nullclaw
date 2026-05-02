@@ -253,29 +253,6 @@ fn runNativeRequestWithStatus(
     };
 }
 
-fn duplicateTrimmedErrorOutput(allocator: std.mem.Allocator, raw: ?[]const u8) !?[]u8 {
-    const bytes = raw orelse return null;
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    if (trimmed.len == 0) return null;
-    const copied = try allocator.dupe(u8, trimmed);
-    return copied;
-}
-
-fn ensureTlsCaBundleLoaded(client: *std.http.Client) !void {
-    if (@atomicLoad(bool, &client.next_https_rescan_certs, .acquire)) {
-        client.ca_bundle_mutex.lock();
-        defer client.ca_bundle_mutex.unlock();
-
-        if (client.next_https_rescan_certs) {
-            client.ca_bundle.rescan(client.allocator) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.CertificateBundleLoadFailure,
-            };
-            @atomicStore(bool, &client.next_https_rescan_certs, false, .release);
-        }
-    }
-}
-
 fn isTlsSetupError(err: anyerror) bool {
     return err == error.TlsInitializationFailed or err == error.CertificateBundleLoadFailure;
 }
@@ -300,67 +277,6 @@ fn validateMethod(method: []const u8) ?std.http.Method {
     if (std.ascii.eqlIgnoreCase(method, "HEAD")) return .HEAD;
     if (std.ascii.eqlIgnoreCase(method, "OPTIONS")) return .OPTIONS;
     return null;
-}
-
-/// Disable auto-follow redirects so every hop can be explicitly validated.
-fn buildRequestOptions(
-    extra_headers: []const std.http.Header,
-    connection: ?*std.http.Client.Connection,
-) std.http.Client.RequestOptions {
-    return .{
-        .extra_headers = extra_headers,
-        .redirect_behavior = .unhandled,
-        .connection = connection,
-    };
-}
-
-/// Parse headers from a JSON object string: {"Key": "Value", ...}
-/// Returns array of [2][]const u8 pairs. Caller owns memory.
-fn parseHeaders(allocator: std.mem.Allocator, headers_json: ?[]const u8) ![]const [2][]const u8 {
-    const json = headers_json orelse return &.{};
-    if (json.len < 2) return &.{};
-
-    var list: std.ArrayList([2][]const u8) = .empty;
-    errdefer {
-        for (list.items) |h| {
-            allocator.free(h[0]);
-            allocator.free(h[1]);
-        }
-        list.deinit(allocator);
-    }
-
-    // Simple JSON object parser: find "key": "value" pairs
-    var pos: usize = 0;
-    while (pos < json.len) {
-        // Find next key (quoted string)
-        const key_start = std.mem.indexOfScalarPos(u8, json, pos, '"') orelse break;
-        const key_end = std.mem.indexOfScalarPos(u8, json, key_start + 1, '"') orelse break;
-        const key = json[key_start + 1 .. key_end];
-
-        // Skip to colon and value
-        pos = key_end + 1;
-        const colon = std.mem.indexOfScalarPos(u8, json, pos, ':') orelse break;
-        pos = colon + 1;
-
-        // Skip whitespace
-        while (pos < json.len and (json[pos] == ' ' or json[pos] == '\t' or json[pos] == '\n')) : (pos += 1) {}
-
-        if (pos >= json.len or json[pos] != '"') {
-            pos += 1;
-            continue;
-        }
-        const val_start = pos;
-        const val_end = std.mem.indexOfScalarPos(u8, json, val_start + 1, '"') orelse break;
-        const value = json[val_start + 1 .. val_end];
-        pos = val_end + 1;
-
-        try list.append(allocator, .{
-            try allocator.dupe(u8, key),
-            try allocator.dupe(u8, value),
-        });
-    }
-
-    return list.toOwnedSlice(allocator);
 }
 
 /// Redact sensitive headers for display output.
@@ -505,20 +421,6 @@ test "isSensitiveHeader treats oversized names as sensitive" {
     var long_name: [300]u8 = undefined;
     @memset(long_name[0..], 'a');
     try std.testing.expect(isSensitiveHeader(long_name[0..]));
-}
-
-test "http_request disables automatic redirects" {
-    const opts = buildRequestOptions(&.{}, null);
-    try std.testing.expect(opts.redirect_behavior == .unhandled);
-    try std.testing.expect(opts.connection == null);
-}
-
-test "http_request request options keep provided connection" {
-    const fake_ptr_value = @as(usize, @alignOf(std.http.Client.Connection));
-    const fake_connection: *std.http.Client.Connection = @ptrFromInt(fake_ptr_value);
-    const opts = buildRequestOptions(&.{}, fake_connection);
-    try std.testing.expect(opts.connection != null);
-    try std.testing.expectEqual(@intFromPtr(fake_connection), @intFromPtr(opts.connection.?));
 }
 
 // ── execute-level tests ──────────────────────────────────────
@@ -791,36 +693,4 @@ test "buildHttpRequestErrorMessage includes TLS hint" {
     const msg = try buildHttpRequestErrorMessage(std.testing.allocator, "HTTP request failed", error.TlsInitializationFailed);
     defer std.testing.allocator.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "system CA certificates") != null);
-}
-
-test "duplicateTrimmedErrorOutput trims non-empty stderr" {
-    const copied = (try duplicateTrimmedErrorOutput(std.testing.allocator, "\n network: could not resolve host \n")).?;
-    defer std.testing.allocator.free(copied);
-    try std.testing.expectEqualStrings("network: could not resolve host", copied);
-}
-
-test "duplicateTrimmedErrorOutput ignores empty stderr" {
-    try std.testing.expect((try duplicateTrimmedErrorOutput(std.testing.allocator, "  \n\t  ")) == null);
-    try std.testing.expect((try duplicateTrimmedErrorOutput(std.testing.allocator, null)) == null);
-}
-
-// ── parseHeaders tests ──────────────────────────────────────
-
-test "parseHeaders basic" {
-    const headers = try parseHeaders(std.testing.allocator, "{\"Content-Type\": \"application/json\"}");
-    defer {
-        for (headers) |h| {
-            std.testing.allocator.free(h[0]);
-            std.testing.allocator.free(h[1]);
-        }
-        std.testing.allocator.free(headers);
-    }
-    try std.testing.expectEqual(@as(usize, 1), headers.len);
-    try std.testing.expectEqualStrings("Content-Type", headers[0][0]);
-    try std.testing.expectEqualStrings("application/json", headers[0][1]);
-}
-
-test "parseHeaders null returns empty" {
-    const headers = try parseHeaders(std.testing.allocator, null);
-    try std.testing.expectEqual(@as(usize, 0), headers.len);
 }

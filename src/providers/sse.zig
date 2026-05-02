@@ -3,8 +3,6 @@ const std_compat = @import("compat");
 const root = @import("root.zig");
 const http_util = @import("../http_util.zig");
 const error_classify = @import("error_classify.zig");
-const verbose = @import("../verbose.zig");
-const log = std.log.scoped(.provider_sse);
 
 fn finalizeStreamResult(
     allocator: std.mem.Allocator,
@@ -30,6 +28,29 @@ fn finalizeStreamResult(
         .usage = usage,
         .model = "",
     };
+}
+
+fn isJsonObjectResponse(body: []const u8) bool {
+    const trimmed = std.mem.trim(u8, body, " \t\r\n");
+    return trimmed.len > 0 and trimmed[0] == '{';
+}
+
+pub fn rejectJsonOrHttpErrorResponse(allocator: std.mem.Allocator, status_code: u16, body: []const u8) !void {
+    if (!isJsonObjectResponse(body)) {
+        if (status_code >= 400) return error.ServerError;
+        return;
+    }
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch null;
+    if (parsed) |pval| {
+        defer pval.deinit();
+        if (pval.value == .object) {
+            if (error_classify.classifyKnownApiError(pval.value.object)) |kind| {
+                return error_classify.kindToError(kind);
+            }
+        }
+    }
+    return error.ServerError;
 }
 
 /// Result of parsing a single SSE line.
@@ -189,22 +210,11 @@ pub fn httpStream(
         .timeout_secs = if (timeout_secs == 0) null else timeout_secs,
         .resolve_entry = resolve_entry,
         .max_response_bytes = 16 * 1024 * 1024,
-        .fail_on_http_error = true,
+        .fail_on_http_error = false,
     });
     defer response.deinit(allocator);
 
-    if (response.body.len > 0 and response.body[0] == '{') {
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, response.body, .{}) catch null;
-        if (parsed) |pval| {
-            defer pval.deinit();
-            if (pval.value == .object) {
-                if (error_classify.classifyKnownApiError(pval.value.object)) |kind| {
-                    return error_classify.kindToError(kind);
-                }
-            }
-        }
-        return error.ServerError;
-    }
+    try rejectJsonOrHttpErrorResponse(allocator, response.status_code, response.body);
 
     var accumulated: std.ArrayListUnmanaged(u8) = .empty;
     defer accumulated.deinit(allocator);
@@ -394,9 +404,11 @@ pub fn httpStreamAnthropic(
         .proxy = proxy,
         .resolve_entry = resolve_entry,
         .max_response_bytes = 16 * 1024 * 1024,
-        .fail_on_http_error = true,
+        .fail_on_http_error = false,
     });
     defer response.deinit(allocator);
+
+    try rejectJsonOrHttpErrorResponse(allocator, response.status_code, response.body);
 
     var accumulated: std.ArrayListUnmanaged(u8) = .empty;
     defer accumulated.deinit(allocator);
@@ -591,7 +603,7 @@ test "native migration streams OpenAI-compatible SSE through http helper" {
             try std.testing.expectEqual(std.http.Method.POST, request.method);
             try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1/chat/completions", request.url);
             try std.testing.expectEqualStrings("{\"stream\":true}", request.payload.?);
-            try std.testing.expect(request.fail_on_http_error);
+            try std.testing.expect(!request.fail_on_http_error);
             try std.testing.expectEqual(@as(?u64, 9), request.timeout_secs);
             try std.testing.expectEqual(@as(usize, 3), request.headers.len);
             try std.testing.expectEqualStrings("Content-Type", request.headers[0].name);
@@ -654,7 +666,7 @@ test "native migration streams Anthropic SSE through http helper" {
             try std.testing.expectEqual(std.http.Method.POST, request.method);
             try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1/messages", request.url);
             try std.testing.expectEqualStrings("{\"stream\":true}", request.payload.?);
-            try std.testing.expect(request.fail_on_http_error);
+            try std.testing.expect(!request.fail_on_http_error);
             try std.testing.expectEqual(@as(usize, 2), request.headers.len);
             try std.testing.expectEqualStrings("Content-Type", request.headers[0].name);
             try std.testing.expectEqualStrings("application/json", request.headers[0].value);
@@ -707,6 +719,39 @@ test "native migration streams Anthropic SSE through http helper" {
     try std.testing.expectEqualStrings("Hi", capture.text.items);
     try std.testing.expectEqualStrings("Hi", result.content.?);
     try std.testing.expectEqual(@as(u32, 7), result.usage.completion_tokens);
+}
+
+test "native migration stream classifies json error body after http status failure" {
+    const allocator = std.testing.allocator;
+    const handler = struct {
+        fn handle(alloc: std.mem.Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            try std.testing.expect(!request.fail_on_http_error);
+            return .{
+                .status_code = 429,
+                .body = try alloc.dupe(u8, "{\"error\":{\"message\":\"rate limit exceeded\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"}}"),
+            };
+        }
+    }.handle;
+
+    http_util.setTestNativeHttpHandler(handler);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    var callback_ctx: usize = 0;
+    try std.testing.expectError(
+        error.RateLimited,
+        httpStream(
+            allocator,
+            "http://127.0.0.1:11434/v1/chat/completions",
+            "{\"stream\":true}",
+            null,
+            &.{},
+            9,
+            struct {
+                fn onChunk(_: *anyopaque, _: root.StreamChunk) void {}
+            }.onChunk,
+            @ptrCast(&callback_ctx),
+        ),
+    );
 }
 
 // ── Anthropic SSE Tests ─────────────────────────────────────────

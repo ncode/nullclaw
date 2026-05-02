@@ -576,7 +576,7 @@ fn runNativeHttpRequest(allocator: Allocator, request: NativeHttpRequest) !Nativ
 
     var redirect_buffer: [8192]u8 = undefined;
     const redirect_behavior: std.http.Client.Request.RedirectBehavior = if (request.follow_redirects and request.payload == null)
-        @enumFromInt(3)
+        std.http.Client.Request.RedirectBehavior.init(3)
     else
         .unhandled;
 

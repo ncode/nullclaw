@@ -399,9 +399,11 @@ fn codexStreamRequest(
         .timeout_secs = if (timeout_secs == 0) null else timeout_secs,
         .resolve_entry = resolve_entry,
         .max_response_bytes = 16 * 1024 * 1024,
-        .fail_on_http_error = true,
+        .fail_on_http_error = false,
     });
     defer response.deinit(allocator);
+
+    try sse.rejectJsonOrHttpErrorResponse(allocator, response.status_code, response.body);
 
     var accumulated: std.ArrayListUnmanaged(u8) = .empty;
     defer accumulated.deinit(allocator);
@@ -1108,7 +1110,7 @@ test "codex stream native migration posts headers and parses SSE body" {
             try std.testing.expectEqual(std.http.Method.POST, request.method);
             try std.testing.expectEqualStrings("http://127.0.0.1:11434/backend-api/codex/responses", request.url);
             try std.testing.expectEqualStrings("{\"input\":[]}", request.payload.?);
-            try std.testing.expect(request.fail_on_http_error);
+            try std.testing.expect(!request.fail_on_http_error);
             try std.testing.expectEqual(@as(?u64, 13), request.timeout_secs);
             try std.testing.expectEqual(@as(usize, 3), request.headers.len);
             try std.testing.expectEqualStrings("Content-Type", request.headers[0].name);

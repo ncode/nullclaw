@@ -46,6 +46,7 @@ const channel_adapters = @import("channel_adapters.zig");
 const cron_mod = @import("cron.zig");
 const ConversationContext = @import("agent/prompt.zig").ConversationContext;
 const buildConversationContext = @import("agent/prompt.zig").buildConversationContext;
+const log = std.log.scoped(.gateway);
 
 /// Maximum request body size (64KB) — prevents memory exhaustion.
 pub const MAX_BODY_SIZE: usize = 65_536;
@@ -54,6 +55,8 @@ const MAX_HEADER_SIZE: usize = 8_192;
 /// Request timeout (30s) — prevents slow-loris attacks.
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 const ACCEPT_POLL_INTERVAL_MS: u64 = 100;
+const ACCEPT_ERROR_BACKOFF_MAX_MS: u64 = 1_000;
+const ACCEPT_ERROR_LOG_INTERVAL: u32 = 20;
 
 /// Sliding window for rate limiting (60s).
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
@@ -3185,7 +3188,7 @@ fn handleTelegramWebhookRoute(ctx: *WebhookHandlerContext) void {
                     std.mem.eql(u8, peer_kind, "group"),
                     if (std.mem.eql(u8, peer_kind, "group")) cid_str else null,
                 );
-                const reply: ?[]const u8 = sm.processMessage(sk, msg_text.?, conversation_context) catch |err| blk: {
+                const reply: ?[]const u8 = sm.processInboundMessage(sk, msg_text.?, conversation_context) catch |err| blk: {
                     if (tg_bot_token.len > 0) {
                         sendTelegramReply(ctx.req_allocator, tg_bot_token, chat_id.?, thread_id, userFacingAgentError(err)) catch {};
                     }
@@ -3332,7 +3335,7 @@ fn handleWhatsAppWebhookRoute(ctx: *WebhookHandlerContext) void {
                     wa_is_group,
                     wa_group_id,
                 );
-                const reply: ?[]const u8 = sm.processMessage(wa_session_key, mt, conversation_context) catch |err| blk: {
+                const reply: ?[]const u8 = sm.processInboundMessage(wa_session_key, mt, conversation_context) catch |err| blk: {
                     ctx.response_body = userFacingAgentErrorJson(err);
                     break :blk null;
                 };
@@ -3396,7 +3399,7 @@ fn handleWhatsAppWebhookRoute(ctx: *WebhookHandlerContext) void {
                     wa_is_group,
                     wa_group_id,
                 );
-                const reply: ?[]const u8 = sm.processMessage(wa_session_key, mt, conversation_context) catch |err| blk: {
+                const reply: ?[]const u8 = sm.processInboundMessage(wa_session_key, mt, conversation_context) catch |err| blk: {
                     ctx.response_body = userFacingAgentErrorJson(err);
                     break :blk null;
                 };
@@ -3607,7 +3610,7 @@ fn handleSlackWebhookRoute(ctx: *WebhookHandlerContext) void {
                         !interactive_target.is_dm,
                         if (!interactive_target.is_dm) interactive_target.channel_id else null,
                     );
-                    const reply: ?[]const u8 = sm.processMessage(session_key, selection.submit_text, conversation_context) catch |err| blk: {
+                    const reply: ?[]const u8 = sm.processInboundMessage(session_key, selection.submit_text, conversation_context) catch |err| blk: {
                         var outbound_ch = channels.slack.SlackChannel.initFromConfig(ctx.req_allocator, slack_cfg.*);
                         outbound_ch.sendMessage(selection.target, userFacingAgentError(err)) catch {};
                         break :blk null;
@@ -3749,7 +3752,7 @@ fn handleSlackWebhookRoute(ctx: *WebhookHandlerContext) void {
             !is_dm,
             if (!is_dm) channel_id else null,
         );
-        const reply: ?[]const u8 = sm.processMessage(sk, text, conversation_context) catch |err| blk: {
+        const reply: ?[]const u8 = sm.processInboundMessage(sk, text, conversation_context) catch |err| blk: {
             var outbound_ch = channels.slack.SlackChannel.initFromConfig(ctx.req_allocator, slack_cfg.*);
             outbound_ch.sendMessage(channel_id, userFacingAgentError(err)) catch {};
             break :blk null;
@@ -3886,7 +3889,7 @@ fn handleLineWebhookRoute(ctx: *WebhookHandlerContext) void {
                         !std.mem.eql(u8, line_peer.kind, "direct"),
                         if (!std.mem.eql(u8, line_peer.kind, "direct")) line_peer.id else null,
                     );
-                    const reply: ?[]const u8 = sm.processMessage(sk, text, conversation_context) catch |err| blk: {
+                    const reply: ?[]const u8 = sm.processInboundMessage(sk, text, conversation_context) catch |err| blk: {
                         if (evt.reply_token) |rt| {
                             var line_ch = channels.line.LineChannel.init(ctx.req_allocator, .{
                                 .access_token = line_access_token,
@@ -4015,7 +4018,7 @@ fn handleLarkWebhookRoute(ctx: *WebhookHandlerContext) void {
                 msg.is_group,
                 if (msg.is_group) msg.sender else null,
             );
-            const reply: ?[]const u8 = sm.processMessage(sk, msg.content, conversation_context) catch |err| blk: {
+            const reply: ?[]const u8 = sm.processInboundMessage(sk, msg.content, conversation_context) catch |err| blk: {
                 lark_ch.sendMessage(msg.sender, userFacingAgentError(err)) catch {};
                 break :blk null;
             };
@@ -4261,7 +4264,7 @@ fn handleWeChatWebhookRoute(ctx: *WebhookHandlerContext) void {
             ctx.config_opt,
             wechat_account_id,
         );
-        const reply: ?[]const u8 = sm.processMessage(session_key, inbound.content, null) catch null;
+        const reply: ?[]const u8 = sm.processInboundMessage(session_key, inbound.content, null) catch null;
         if (reply) |r| {
             defer ctx.root_allocator.free(r);
             const now_secs = std_compat.time.timestamp();
@@ -4457,7 +4460,7 @@ fn handleWeComWebhookRoute(ctx: *WebhookHandlerContext) void {
     }
 
     if (ctx.session_mgr_opt) |sm| {
-        const reply: ?[]const u8 = sm.processMessage(session_key, inbound.content, null) catch |err| blk: {
+        const reply: ?[]const u8 = sm.processInboundMessage(session_key, inbound.content, null) catch |err| blk: {
             if (wecom_cfg_opt) |wecom_cfg| {
                 var wecom_ch = channels.wecom.WeComChannel.initFromConfig(ctx.req_allocator, wecom_cfg.*);
                 wecom_ch.sendMessageAuto("", userFacingAgentError(err)) catch {};
@@ -4580,7 +4583,7 @@ fn handleQqWebhookRoute(ctx: *WebhookHandlerContext) void {
                 .is_group = if (peer) |resolved| resolved.kind != .direct else null,
                 .group_id = if (peer) |resolved| if (resolved.kind == .direct) null else resolved.id else null,
             });
-            const reply: ?[]const u8 = sm.processMessage(session_key, inbound.content, conversation_context) catch |err| blk: {
+            const reply: ?[]const u8 = sm.processInboundMessage(session_key, inbound.content, conversation_context) catch |err| blk: {
                 qq_channel.sendMessage(inbound.chat_id, userFacingAgentError(err)) catch {};
                 break :blk null;
             };
@@ -4697,7 +4700,7 @@ fn handleMaxWebhookRoute(ctx: *WebhookHandlerContext) void {
                 inbound.is_group,
                 if (inbound.is_group) reply_target else null,
             );
-            const reply: ?[]const u8 = sm.processMessage(sk, inbound.content, conversation_context) catch |err| blk: {
+            const reply: ?[]const u8 = sm.processInboundMessage(sk, inbound.content, conversation_context) catch |err| blk: {
                 max_ch.sendMessage(reply_target, userFacingAgentError(err)) catch {};
                 break :blk null;
             };
@@ -4901,7 +4904,7 @@ fn handleTeamsWebhookRoute(ctx: *WebhookHandlerContext) void {
     if (ctx.state.event_bus) |eb| {
         _ = publishToBus(eb, ctx.state.allocator, "teams", from_id, chat_id, text, sk, metadata);
     } else if (ctx.session_mgr_opt) |sm| {
-        const reply: ?[]const u8 = sm.processMessage(sk, text, conversation_context) catch blk: {
+        const reply: ?[]const u8 = sm.processInboundMessage(sk, text, conversation_context) catch blk: {
             break :blk null;
         };
         if (reply) |r| {
@@ -5112,6 +5115,12 @@ pub fn clearSharedScheduler() void {
     g_shared_scheduler_mutex.lock();
     defer g_shared_scheduler_mutex.unlock();
     g_shared_scheduler = null;
+}
+
+fn nextAcceptSleepMs(previous_sleep_ms: u64, err: anyerror) u64 {
+    if (err == error.WouldBlock) return ACCEPT_POLL_INTERVAL_MS;
+    const base = if (previous_sleep_ms < ACCEPT_POLL_INTERVAL_MS) ACCEPT_POLL_INTERVAL_MS else previous_sleep_ms;
+    return @min(base * 2, ACCEPT_ERROR_BACKOFF_MAX_MS);
 }
 
 /// Run the HTTP gateway. Binds to host:port and serves HTTP requests.
@@ -5380,17 +5389,32 @@ pub fn run(
         }
     }
 
+    var accept_sleep_ms: u64 = ACCEPT_POLL_INTERVAL_MS;
+    var accept_error_count: u32 = 0;
+
     // Accept loop — read raw HTTP from TCP connections
     while (true) {
         if (daemon_mode and daemon.isShutdownRequested()) break;
 
         var conn = server.accept() catch |err| switch (err) {
             error.WouldBlock => {
-                std_compat.thread.sleep(ACCEPT_POLL_INTERVAL_MS * std.time.ns_per_ms);
+                accept_sleep_ms = nextAcceptSleepMs(accept_sleep_ms, err);
+                std_compat.thread.sleep(accept_sleep_ms * std.time.ns_per_ms);
                 continue;
             },
-            else => continue,
+            else => {
+                accept_error_count +|= 1;
+                const next_sleep_ms = nextAcceptSleepMs(accept_sleep_ms, err);
+                if (accept_error_count == 1 or (accept_error_count % ACCEPT_ERROR_LOG_INTERVAL) == 0) {
+                    log.warn("gateway accept failed ({s}); backing off for {d}ms", .{ @errorName(err), next_sleep_ms });
+                }
+                accept_sleep_ms = next_sleep_ms;
+                std_compat.thread.sleep(accept_sleep_ms * std.time.ns_per_ms);
+                continue;
+            },
         };
+        accept_sleep_ms = ACCEPT_POLL_INTERVAL_MS;
+        accept_error_count = 0;
         var close_conn = true;
         defer if (close_conn) conn.stream.close();
         configureRequestReadTimeout(&conn.stream, request_timeout_secs);
@@ -5653,7 +5677,7 @@ pub fn run(
                                 response_body = "{\"status\":\"received\"}";
                             } else if (session_mgr_opt) |*sm| {
                                 const start_seq = gateway_thread_observer.currentSeq();
-                                const reply: ?[]const u8 = sm.processMessage(routing.session_key, msg_text, routing.conversation_context) catch |err| blk: {
+                                const reply: ?[]const u8 = sm.processInboundMessage(routing.session_key, msg_text, routing.conversation_context) catch |err| blk: {
                                     response_body = userFacingAgentErrorJson(err);
                                     break :blk null;
                                 };
@@ -8728,6 +8752,18 @@ test "readHttpRequestFromReader maps Timeout to RequestTimeout" {
 
     var reader = TimeoutReader{};
     try std.testing.expectError(error.RequestTimeout, readHttpRequestFromReader(std.testing.allocator, &reader, MAX_BODY_SIZE));
+}
+
+test "nextAcceptSleepMs resets to poll interval on WouldBlock" {
+    try std.testing.expectEqual(ACCEPT_POLL_INTERVAL_MS, nextAcceptSleepMs(800, error.WouldBlock));
+}
+
+test "nextAcceptSleepMs exponentially backs off and caps for non-WouldBlock errors" {
+    const unexpected = error.Unexpected;
+    try std.testing.expectEqual(@as(u64, 200), nextAcceptSleepMs(100, unexpected));
+    try std.testing.expectEqual(@as(u64, 800), nextAcceptSleepMs(400, unexpected));
+    try std.testing.expectEqual(ACCEPT_ERROR_BACKOFF_MAX_MS, nextAcceptSleepMs(900, unexpected));
+    try std.testing.expectEqual(ACCEPT_ERROR_BACKOFF_MAX_MS, nextAcceptSleepMs(ACCEPT_ERROR_BACKOFF_MAX_MS, unexpected));
 }
 
 test "maybeProbeA2aVision skips probe when a2a is disabled" {
