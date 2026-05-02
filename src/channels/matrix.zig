@@ -24,6 +24,9 @@ pub const MatrixChannel = struct {
     dm_policy: []const u8,
     group_policy: []const u8,
     require_mention: bool = false,
+    /// Effective API endpoint: pantalaimon proxy URL when E2EE is enabled,
+    /// otherwise equals homeserver. All Matrix API requests use this.
+    effective_endpoint: []const u8 = "",
     running: bool = false,
 
     next_batch_buf: [1024]u8 = undefined,
@@ -39,9 +42,11 @@ pub const MatrixChannel = struct {
         room_id: []const u8,
         allow_from: []const []const u8,
     ) MatrixChannel {
+        const hs = stripTrailingSlashes(homeserver);
         return .{
             .allocator = allocator,
-            .homeserver = stripTrailingSlashes(homeserver),
+            .homeserver = hs,
+            .effective_endpoint = hs,
             .access_token = access_token,
             .room_id = room_id,
             .allow_from = allow_from,
@@ -59,6 +64,9 @@ pub const MatrixChannel = struct {
         ch.dm_policy = cfg.dm_policy;
         ch.group_policy = cfg.group_policy;
         ch.require_mention = cfg.require_mention;
+        if (cfg.pantalaimon_proxy_url) |proxy| {
+            ch.effective_endpoint = stripTrailingSlashes(proxy);
+        }
         return ch;
     }
 
@@ -84,14 +92,14 @@ pub const MatrixChannel = struct {
 
     fn buildWhoAmIUrl(self: *const MatrixChannel, buf: []u8) ![]const u8 {
         var w: std.Io.Writer = .fixed(buf);
-        try w.writeAll(self.homeserver);
+        try w.writeAll(self.effective_endpoint);
         try w.writeAll("/_matrix/client/v3/account/whoami");
         return w.buffered();
     }
 
     fn buildSyncUrl(self: *const MatrixChannel, buf: []u8) ![]const u8 {
         var w: std.Io.Writer = .fixed(buf);
-        try w.writeAll(self.homeserver);
+        try w.writeAll(self.effective_endpoint);
         try w.writeAll("/_matrix/client/v3/sync?timeout=30000");
         if (self.next_batch_len > 0) {
             try w.writeAll("&since=");
@@ -102,7 +110,7 @@ pub const MatrixChannel = struct {
 
     fn buildSendUrl(self: *const MatrixChannel, buf: []u8, room_id: []const u8, txn_id: []const u8) ![]const u8 {
         var w: std.Io.Writer = .fixed(buf);
-        try w.writeAll(self.homeserver);
+        try w.writeAll(self.effective_endpoint);
         try w.writeAll("/_matrix/client/v3/rooms/");
         try appendUrlEncoded(&w, room_id);
         try w.writeAll("/send/m.room.message/");
@@ -112,7 +120,7 @@ pub const MatrixChannel = struct {
 
     fn buildTypingUrl(self: *const MatrixChannel, buf: []u8, room_id: []const u8, user_id: []const u8) ![]const u8 {
         var w: std.Io.Writer = .fixed(buf);
-        try w.writeAll(self.homeserver);
+        try w.writeAll(self.effective_endpoint);
         try w.writeAll("/_matrix/client/v3/rooms/");
         try appendUrlEncoded(&w, room_id);
         try w.writeAll("/typing/");
@@ -122,7 +130,7 @@ pub const MatrixChannel = struct {
 
     fn buildJoinUrl(self: *const MatrixChannel, buf: []u8, room_id: []const u8) ![]const u8 {
         var w: std.Io.Writer = .fixed(buf);
-        try w.writeAll(self.homeserver);
+        try w.writeAll(self.effective_endpoint);
         try w.writeAll("/_matrix/client/v3/rooms/");
         try appendUrlEncoded(&w, room_id);
         try w.writeAll("/join");
@@ -784,6 +792,60 @@ test "MatrixChannel initFromConfig maps account and policy fields" {
     try std.testing.expect(ch.require_mention);
     try std.testing.expectEqual(@as(usize, 1), ch.allow_from.len);
     try std.testing.expectEqual(@as(usize, 1), ch.group_allow_from.len);
+    try std.testing.expectEqualStrings("https://matrix.example", ch.effective_endpoint);
+}
+
+test "MatrixChannel initFromConfig routes through pantalaimon when proxy is set" {
+    const cfg = config_types.MatrixConfig{
+        .homeserver = "https://matrix.example/",
+        .access_token = "tok",
+        .room_id = "!room:example",
+        .allow_from = &.{"*"},
+        .pantalaimon_proxy_url = "http://localhost:8008/",
+    };
+    const ch = MatrixChannel.initFromConfig(std.testing.allocator, cfg);
+    try std.testing.expectEqualStrings("https://matrix.example", ch.homeserver);
+    try std.testing.expectEqualStrings("http://localhost:8008", ch.effective_endpoint);
+}
+
+test "MatrixChannel initFromConfig falls back to homeserver when proxy is null" {
+    const cfg = config_types.MatrixConfig{
+        .homeserver = "https://matrix.example/",
+        .access_token = "tok",
+        .room_id = "!room:example",
+        .allow_from = &.{"*"},
+        .pantalaimon_proxy_url = null,
+    };
+    const ch = MatrixChannel.initFromConfig(std.testing.allocator, cfg);
+    try std.testing.expectEqualStrings("https://matrix.example", ch.effective_endpoint);
+}
+
+test "MatrixChannel URL builders use effective_endpoint" {
+    var ch = MatrixChannel.initFromConfig(std.testing.allocator, .{
+        .homeserver = "https://matrix.example/",
+        .access_token = "tok",
+        .room_id = "!room:example",
+        .allow_from = &.{"*"},
+        .pantalaimon_proxy_url = "http://localhost:8008",
+    });
+    var buf: [512]u8 = undefined;
+
+    // Regression: every Matrix Client-Server API URL must route through
+    // Pantalaimon when the proxy endpoint is configured.
+    const whoami_url = try ch.buildWhoAmIUrl(&buf);
+    try std.testing.expect(std.mem.startsWith(u8, whoami_url, "http://localhost:8008/_matrix/"));
+
+    const sync_url = try ch.buildSyncUrl(&buf);
+    try std.testing.expect(std.mem.startsWith(u8, sync_url, "http://localhost:8008/_matrix/"));
+
+    const send_url = try ch.buildSendUrl(&buf, "!room:example", "txn-1");
+    try std.testing.expect(std.mem.startsWith(u8, send_url, "http://localhost:8008/_matrix/"));
+
+    const typing_url = try ch.buildTypingUrl(&buf, "!room:example", "@bot:example");
+    try std.testing.expect(std.mem.startsWith(u8, typing_url, "http://localhost:8008/_matrix/"));
+
+    const join_url = try ch.buildJoinUrl(&buf, "!room:example");
+    try std.testing.expect(std.mem.startsWith(u8, join_url, "http://localhost:8008/_matrix/"));
 }
 
 test "MatrixChannel buildTypingUrl encodes room and user ids" {

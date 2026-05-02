@@ -47,6 +47,7 @@ const ToolExecutionResult = dispatcher.ToolExecutionResult;
 
 /// Maximum agentic tool-use iterations per user message.
 const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 25;
+const MAX_MID_TURN_INJECTION_FOLLOWUPS: u32 = 8;
 
 /// Maximum non-system messages before trimming.
 const DEFAULT_MAX_HISTORY: u32 = 50;
@@ -54,6 +55,30 @@ const DEFAULT_MAX_HISTORY: u32 = 50;
 pub fn estimate_text_tokens(text: []const u8) u32 {
     return @intCast((text.len + 3) / 4);
 }
+
+// ─── Progress hints ──────────────────────────────────────────────────────────
+
+/// Progress hint emitted during a turn. For tool-call starts, text is the tool name.
+pub const ProgressHint = struct {
+    text: []const u8,
+};
+
+/// Callback invoked for each progress hint. Same lifetime rules as StreamCallback.
+pub const ProgressCallback = *const fn (ctx: *anyopaque, hint: ProgressHint) void;
+
+/// Sink wrapping a ProgressCallback + context pointer.
+pub const ProgressSink = struct {
+    callback: ProgressCallback,
+    ctx: *anyopaque,
+
+    pub fn emit(self: ProgressSink, hint: ProgressHint) void {
+        self.callback(self.ctx, hint);
+    }
+};
+
+/// Callback invoked at each tool-loop boundary to drain a pending mid-turn injection.
+/// Returns an owned slice allocated with the provided allocator, or null if empty.
+pub const DrainCallback = *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!?[]u8;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Agent
@@ -151,7 +176,7 @@ pub const Agent = struct {
         }
     };
 
-    const QueueMode = enum {
+    pub const QueueMode = enum {
         off,
         serial,
         latest,
@@ -326,6 +351,9 @@ pub const Agent = struct {
     /// Empty = no filtering; all tool specs are sent as-is.
     tool_filter_groups: []const config_types.ToolFilterGroup = &.{},
 
+    /// Tool customization config (system_prompt overrides, triggers, enabled flags).
+    tools_config: config_types.ToolsConfig = .{},
+
     /// Optional security policy for autonomy checks and rate limiting.
     policy: ?*const SecurityPolicy = null,
 
@@ -333,6 +361,16 @@ pub const Agent = struct {
     stream_callback: ?providers.StreamCallback = null,
     /// Context pointer passed to stream_callback.
     stream_ctx: ?*anyopaque = null,
+    /// Optional progress hint callback. When set, called on tool_call_start events.
+    progress_callback: ?ProgressCallback = null,
+    /// Context pointer passed to progress_callback.
+    progress_ctx: ?*anyopaque = null,
+    /// Optional mid-turn injection drain. When set, called at each tool-loop boundary
+    /// to pull a pending user message and fold it into the active turn.
+    /// Returns an owned slice (allocated with the agent allocator) or null if empty.
+    drain_injection_cb: ?DrainCallback = null,
+    /// Context pointer passed to drain_injection_cb.
+    drain_injection_ctx: ?*anyopaque = null,
     /// Optional callback invoked for each LLM response usage record.
     usage_record_callback: ?UsageRecordCallback = null,
     /// Context pointer passed to usage_record_callback.
@@ -400,6 +438,15 @@ pub const Agent = struct {
             msg.deinit(self.allocator);
             return err;
         };
+    }
+
+    fn drainPendingInjection(self: *Agent) !?[]u8 {
+        if (self.drain_injection_cb) |drain_cb| {
+            if (self.drain_injection_ctx) |drain_ctx| {
+                return try drain_cb(drain_ctx, self.allocator);
+            }
+        }
+        return null;
     }
 
     /// Initialize agent from a loaded Config.
@@ -513,6 +560,7 @@ pub const Agent = struct {
             .compaction_keep_recent = cfg.agent.compaction_keep_recent,
             .compaction_max_summary_chars = cfg.agent.compaction_max_summary_chars,
             .compaction_max_source_chars = cfg.agent.compaction_max_source_chars,
+            .tools_config = cfg.tools,
             .tool_filter_groups = cfg.agent.tool_filter_groups,
             .default_exec_security = resolved_exec_security,
             .exec_security = resolved_exec_security,
@@ -945,6 +993,51 @@ pub const Agent = struct {
             if (matched) return true;
         }
         return false;
+    }
+
+    fn isToolTriggerSeparator(self: *const Agent, c: u8) bool {
+        return std.ascii.isWhitespace(c) or std.mem.indexOfScalar(u8, self.tools_config.trigger_punctuation, c) != null;
+    }
+
+    fn nextToolTriggerWord(self: *const Agent, text: []const u8, idx: *usize) ?[]const u8 {
+        while (idx.* < text.len and self.isToolTriggerSeparator(text[idx.*])) : (idx.* += 1) {}
+        if (idx.* >= text.len) return null;
+
+        const start = idx.*;
+        while (idx.* < text.len and !self.isToolTriggerSeparator(text[idx.*])) : (idx.* += 1) {}
+        return text[start..idx.*];
+    }
+
+    fn isToolTriggerModifier(self: *const Agent, word: []const u8) bool {
+        for (self.tools_config.trigger_modifiers) |modifier| {
+            if (std.ascii.eqlIgnoreCase(word, modifier)) return true;
+        }
+        return false;
+    }
+
+    fn nextUserToolTriggerWord(self: *const Agent, text: []const u8, idx: *usize) ?[]const u8 {
+        while (self.nextToolTriggerWord(text, idx)) |word| {
+            if (!self.isToolTriggerModifier(word)) return word;
+        }
+        return null;
+    }
+
+    fn normalizedToolTriggerEquals(self: *const Agent, user_message: []const u8, trigger: []const u8) bool {
+        var user_idx: usize = 0;
+        var trigger_idx: usize = 0;
+
+        while (self.nextToolTriggerWord(trigger, &trigger_idx)) |trigger_word| {
+            const user_word = self.nextUserToolTriggerWord(user_message, &user_idx) orelse return false;
+            if (!std.ascii.eqlIgnoreCase(user_word, trigger_word)) return false;
+        }
+
+        return self.nextUserToolTriggerWord(user_message, &user_idx) == null;
+    }
+
+    fn toolTriggerMatchesMessage(self: *const Agent, user_message: []const u8, trigger: []const u8) bool {
+        if (containsAsciiIgnoreCase(user_message, trigger)) return true;
+        if (self.tools_config.trigger_modifiers.len == 0 and self.tools_config.trigger_punctuation.len == 0) return false;
+        return self.normalizedToolTriggerEquals(user_message, trigger);
     }
 
     fn hasModelRouteHint(self: *const Agent, hint: []const u8) bool {
@@ -1553,7 +1646,70 @@ pub const Agent = struct {
         return std.mem.endsWith(u8, name, suffix);
     }
 
-    /// Filter `self.tool_specs` for the current turn based on `tool_filter_groups`.
+    fn toolPriorityScoreForMessage(self: *const Agent, tool_name: []const u8, user_message: []const u8) u16 {
+        var best_score: u16 = 0;
+        for (self.tools_config.tool_customizations) |custom| {
+            if (!custom.enabled or custom.triggers.len == 0) continue;
+            if (!std.mem.eql(u8, custom.name, tool_name)) continue;
+
+            for (custom.triggers) |kw| {
+                if (!self.toolTriggerMatchesMessage(user_message, kw)) continue;
+                const score = @as(u16, custom.priority) + 1;
+                if (score > best_score) best_score = score;
+                break;
+            }
+        }
+        return best_score;
+    }
+
+    fn priorityToolForSpecsMessage(self: *const Agent, specs: []const ToolSpec, user_message: []const u8) ?[]const u8 {
+        var best_score: u16 = 0;
+        var best_name: ?[]const u8 = null;
+        for (specs) |spec| {
+            const score = self.toolPriorityScoreForMessage(spec.name, user_message);
+            if (score > best_score) {
+                best_score = score;
+                best_name = spec.name;
+            }
+        }
+        return best_name;
+    }
+
+    fn prioritizeToolSpecsForTurn(
+        self: *const Agent,
+        arena: std.mem.Allocator,
+        specs: []const ToolSpec,
+        user_message: []const u8,
+    ) ![]const ToolSpec {
+        if (self.tools_config.tool_customizations.len == 0 or specs.len < 2) return specs;
+
+        var has_triggered_tool = false;
+        for (specs) |spec| {
+            if (self.toolPriorityScoreForMessage(spec.name, user_message) > 0) {
+                has_triggered_tool = true;
+                break;
+            }
+        }
+        if (!has_triggered_tool) return specs;
+
+        const prioritized = try arena.dupe(ToolSpec, specs);
+        var i: usize = 1;
+        while (i < prioritized.len) : (i += 1) {
+            const current = prioritized[i];
+            const current_score = self.toolPriorityScoreForMessage(current.name, user_message);
+            var j = i;
+            while (j > 0) {
+                const previous_score = self.toolPriorityScoreForMessage(prioritized[j - 1].name, user_message);
+                if (previous_score >= current_score) break;
+                prioritized[j] = prioritized[j - 1];
+                j -= 1;
+            }
+            prioritized[j] = current;
+        }
+        return prioritized;
+    }
+
+    /// Filter and prioritize `self.tool_specs` for the current turn.
     ///
     /// Returns a slice allocated from `arena` containing only the specs that should
     /// be included for this turn.  The returned slice borrows pointers from
@@ -1565,12 +1721,16 @@ pub const Agent = struct {
     ///   - `always` groups unconditionally include matching MCP tools.
     ///   - `dynamic` groups include matching MCP tools when the user message contains
     ///     at least one of the group's keywords (case-insensitive substring match).
+    ///   - Matching `tools.tool_customizations.triggers` move configured tools earlier
+    ///     in the turn's schema, sorted by priority while preserving ties.
     fn filterToolSpecsForTurn(
         self: *const Agent,
         arena: std.mem.Allocator,
         user_message: []const u8,
     ) ![]const ToolSpec {
-        if (self.tool_filter_groups.len == 0) return self.tool_specs;
+        if (self.tool_filter_groups.len == 0) {
+            return self.prioritizeToolSpecsForTurn(arena, self.tool_specs, user_message);
+        }
 
         var result: std.ArrayListUnmanaged(ToolSpec) = .empty;
 
@@ -1615,7 +1775,7 @@ pub const Agent = struct {
             if (include) try result.append(arena, spec);
         }
 
-        return result.toOwnedSlice(arena);
+        return self.prioritizeToolSpecsForTurn(arena, try result.toOwnedSlice(arena), user_message);
     }
 
     /// Execute a single conversation turn: send messages to LLM, parse tool calls,
@@ -1819,20 +1979,23 @@ pub const Agent = struct {
         defer iter_arena.deinit();
 
         var iteration: u32 = 0;
+        var injection_followups: u32 = 0;
         var forced_follow_through_count: u32 = 0;
         var empty_response_retry_count: u32 = 0;
         var seen_tool_call_results: std.AutoHashMapUnmanaged(u64, CachedToolCallResult) = .empty;
         defer deinitSeenToolCallResults(self.allocator, &seen_tool_call_results);
-        while (iteration < self.max_tool_iterations) : (iteration += 1) {
+        while (iteration < self.max_tool_iterations +| injection_followups) : (iteration += 1) {
             if (self.isInterruptRequested()) {
                 return self.interruptedReply();
             }
 
+            // Drain any mid-turn injection at each tool boundary.
+            if (try self.drainPendingInjection()) |injected| {
+                try self.appendOwnedHistoryMessage(.{ .role = .user, .content = injected });
+            }
+
             _ = iter_arena.reset(.retain_capacity);
             const arena = iter_arena.allocator();
-
-            // Build messages slice for provider (arena-owned; freed at end of iteration)
-            const messages = try self.buildProviderMessages(arena, turn_model_name);
 
             const timer_start = std_compat.time.milliTimestamp();
             const is_streaming = self.stream_callback != null and self.stream_ctx != null and self.provider.supportsStreaming();
@@ -1841,6 +2004,10 @@ pub const Agent = struct {
 
             // Filter tool specs for this turn (arena-owned; may be self.tool_specs directly if no groups).
             const turn_tool_specs = try self.filterToolSpecsForTurn(arena, effective_user_message);
+            const priority_tool = self.priorityToolForSpecsMessage(turn_tool_specs, effective_user_message);
+
+            // Build messages slice for provider (arena-owned; freed at end of iteration).
+            const messages = try self.buildProviderMessagesForTurn(arena, turn_model_name, priority_tool);
             const request_max_tokens = self.effectiveMaxTokensForTurn(
                 messages,
                 if (native_tools_enabled) turn_tool_specs else null,
@@ -1882,7 +2049,7 @@ pub const Agent = struct {
                             log.info("Auto-disabling vision for model {s}", .{turn_model_name});
                         }
                         try self.markVisionDisabled(turn_model_name);
-                        const retry_msgs = try self.buildProviderMessages(arena, turn_model_name);
+                        const retry_msgs = try self.buildProviderMessagesForTurn(arena, turn_model_name, priority_tool);
                         const retry_max_tokens = self.effectiveMaxTokensForTurn(
                             retry_msgs,
                             if (native_tools_enabled) turn_tool_specs else null,
@@ -1956,7 +2123,7 @@ pub const Agent = struct {
                             log.info("Auto-disabling vision for model {s}", .{turn_model_name});
                         }
                         try self.markVisionDisabled(turn_model_name);
-                        const retry_msgs = try self.buildProviderMessages(arena, turn_model_name);
+                        const retry_msgs = try self.buildProviderMessagesForTurn(arena, turn_model_name, priority_tool);
                         const retry_max_tokens = self.effectiveMaxTokensForTurn(
                             retry_msgs,
                             if (native_tools_enabled) turn_tool_specs else null,
@@ -1995,7 +2162,7 @@ pub const Agent = struct {
                         self.forceCompressHistory())
                     {
                         self.context_was_compacted = true;
-                        const recovery_msgs = self.buildProviderMessages(arena, turn_model_name) catch |prep_err| return prep_err;
+                        const recovery_msgs = self.buildProviderMessagesForTurn(arena, turn_model_name, priority_tool) catch |prep_err| return prep_err;
                         const recovery_max_tokens = self.effectiveMaxTokensForTurn(
                             recovery_msgs,
                             if (native_tools_enabled) turn_tool_specs else null,
@@ -2058,7 +2225,7 @@ pub const Agent = struct {
                         // force-compress and retry once more
                         if (self.history.items.len > compaction.CONTEXT_RECOVERY_MIN_HISTORY and self.forceCompressHistory()) {
                             self.context_was_compacted = true;
-                            const recovery_msgs = self.buildProviderMessages(arena, turn_model_name) catch |prep_err| return prep_err;
+                            const recovery_msgs = self.buildProviderMessagesForTurn(arena, turn_model_name, priority_tool) catch |prep_err| return prep_err;
                             const recovery_max_tokens = self.effectiveMaxTokensForTurn(
                                 recovery_msgs,
                                 if (native_tools_enabled) turn_tool_specs else null,
@@ -2226,6 +2393,23 @@ pub const Agent = struct {
                     continue;
                 }
 
+                // If an inbound message arrived while the final model response
+                // was being produced, fold it into this active turn instead of
+                // leaving it buffered until an unrelated future message.
+                if (injection_followups < MAX_MID_TURN_INJECTION_FOLLOWUPS) {
+                    if (try self.drainPendingInjection()) |injected| {
+                        try self.appendOwnedHistoryMessage(.{
+                            .role = .assistant,
+                            .content = try self.allocator.dupe(u8, display_text),
+                        });
+                        try self.appendOwnedHistoryMessage(.{ .role = .user, .content = injected });
+                        self.trimHistory();
+                        self.freeResponseFields(&response);
+                        injection_followups += 1;
+                        continue;
+                    }
+                }
+
                 // No tool calls — final response
                 const base_text = if (self.context_was_compacted) blk: {
                     self.context_was_compacted = false;
@@ -2346,6 +2530,9 @@ pub const Agent = struct {
 
                 const tool_start_event = ObserverEvent{ .tool_call_start = .{ .tool = call.name } };
                 self.observer.recordEvent(&tool_start_event);
+                if (self.progress_callback) |cb| {
+                    if (self.progress_ctx) |pctx| cb(pctx, .{ .text = call.name });
+                }
 
                 const tool_timer = std_compat.time.milliTimestamp();
                 const result = blk: {
@@ -3186,6 +3373,33 @@ pub const Agent = struct {
             .skip_dir_check = self.multimodal_unrestricted,
             .allow_remote_fetch = self.multimodal_unrestricted,
         });
+    }
+
+    fn buildProviderMessagesForTurn(
+        self: *Agent,
+        arena: std.mem.Allocator,
+        model_name: []const u8,
+        priority_tool: ?[]const u8,
+    ) ![]ChatMessage {
+        const messages = try self.buildProviderMessages(arena, model_name);
+        const tool_name = priority_tool orelse return messages;
+
+        var i = messages.len;
+        while (i > 0) {
+            i -= 1;
+            if (messages[i].role != .user) continue;
+            if (messages[i].content_parts != null) return messages;
+
+            const with_hint = try arena.dupe(ChatMessage, messages);
+            with_hint[i].content = try std.fmt.allocPrint(
+                arena,
+                "[PRIORITY: Please call the {s} tool immediately] {s}",
+                .{ tool_name, messages[i].content },
+            );
+            return with_hint;
+        }
+
+        return messages;
     }
 
     fn appendMultimodalAllowedDir(
@@ -7440,6 +7654,8 @@ test "Agent streaming fields default to null" {
 
     try std.testing.expect(agent.stream_callback == null);
     try std.testing.expect(agent.stream_ctx == null);
+    try std.testing.expect(agent.progress_callback == null);
+    try std.testing.expect(agent.progress_ctx == null);
 }
 
 // ── Bug regression tests ─────────────────────────────────────────
@@ -9817,6 +10033,116 @@ test "filterToolSpecsForTurn dynamic group keyword match is case-insensitive" {
     const result = try agent.filterToolSpecsForTurn(arena, "Create a TASK for me");
     try std.testing.expectEqual(@as(usize, 1), result.len);
     agent.tool_specs = try allocator.alloc(ToolSpec, 0);
+}
+
+test "filterToolSpecsForTurn prioritizes triggered custom tools" {
+    const allocator = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var agent = try makeTestAgent(allocator);
+    defer agent.deinit();
+    allocator.free(agent.tool_specs);
+    agent.tool_specs = &.{
+        .{ .name = "shell", .description = "run shell", .parameters_json = "{}" },
+        .{ .name = "file_read", .description = "read files", .parameters_json = "{}" },
+        .{ .name = "calculator", .description = "math", .parameters_json = "{}" },
+    };
+    agent.tools_config = .{
+        .tool_customizations = &.{
+            .{ .name = "calculator", .triggers = &.{"calc"}, .priority = 1 },
+            .{ .name = "file_read", .triggers = &.{"read"}, .priority = 10 },
+        },
+    };
+
+    const result = try agent.filterToolSpecsForTurn(arena, "read this file and calc the total");
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expectEqualStrings("file_read", result[0].name);
+    try std.testing.expectEqualStrings("calculator", result[1].name);
+    try std.testing.expectEqualStrings("shell", result[2].name);
+    agent.tool_specs = try allocator.alloc(ToolSpec, 0);
+}
+
+test "filterToolSpecsForTurn applies trigger modifiers and punctuation" {
+    const allocator = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var agent = try makeTestAgent(allocator);
+    defer agent.deinit();
+    allocator.free(agent.tool_specs);
+    agent.tool_specs = &.{
+        .{ .name = "shell", .description = "run shell", .parameters_json = "{}" },
+        .{ .name = "file_read", .description = "read files", .parameters_json = "{}" },
+    };
+    agent.tools_config = .{
+        .trigger_modifiers = &.{ "please", "now" },
+        .trigger_punctuation = "-!",
+        .tool_customizations = &.{
+            .{ .name = "file_read", .triggers = &.{"read file"}, .priority = 5 },
+        },
+    };
+
+    const result = try agent.filterToolSpecsForTurn(arena, "please read-file now!");
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("file_read", result[0].name);
+    try std.testing.expectEqualStrings("shell", result[1].name);
+    agent.tool_specs = try allocator.alloc(ToolSpec, 0);
+}
+
+test "priorityToolForSpecsMessage ignores tools excluded from turn specs" {
+    // Regression: priority hints must not ask for a tool that filterToolSpecsForTurn
+    // excluded from the current turn's advertised schema.
+    const allocator = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var agent = try makeTestAgent(allocator);
+    defer agent.deinit();
+    allocator.free(agent.tool_specs);
+    agent.tool_specs = &.{
+        .{ .name = "shell", .description = "run shell", .parameters_json = "{}" },
+        .{ .name = "mcp_private_lookup", .description = "private lookup", .parameters_json = "{}" },
+    };
+    const patterns: []const []const u8 = &.{"mcp_private_*"};
+    const keywords: []const []const u8 = &.{"lookup"};
+    agent.tool_filter_groups = &.{
+        .{ .mode = .dynamic, .tools = patterns, .keywords = keywords },
+    };
+    agent.tools_config = .{
+        .tool_customizations = &.{
+            .{ .name = "mcp_private_lookup", .triggers = &.{"private"}, .priority = 10 },
+        },
+    };
+
+    const turn_specs = try agent.filterToolSpecsForTurn(arena, "private");
+    try std.testing.expectEqual(@as(usize, 1), turn_specs.len);
+    try std.testing.expectEqualStrings("shell", turn_specs[0].name);
+    try std.testing.expect(agent.priorityToolForSpecsMessage(turn_specs, "private") == null);
+    agent.tool_specs = try allocator.alloc(ToolSpec, 0);
+}
+
+test "buildProviderMessagesForTurn adds priority hint without mutating history" {
+    // Regression: priority hints must not be persisted as user text in history/memory/cache.
+    const allocator = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var agent = try makeTestAgent(allocator);
+    defer agent.deinit();
+    try agent.history.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "please read this file"),
+    });
+
+    const messages = try agent.buildProviderMessagesForTurn(arena, agent.model_name, "file_read");
+    try std.testing.expectEqual(@as(usize, 1), messages.len);
+    try std.testing.expect(std.mem.indexOf(u8, messages[0].content, "[PRIORITY: Please call the file_read tool immediately]") != null);
+    try std.testing.expectEqualStrings("please read this file", agent.history.items[0].content);
 }
 
 test "globMatch handles prefix wildcard" {

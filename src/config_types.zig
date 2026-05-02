@@ -215,7 +215,65 @@ pub const DiagnosticsConfig = struct {
 
         return false;
     }
+
+    pub fn isValidOtelHeaderName(raw: []const u8) bool {
+        return isValidHttpHeaderName(raw);
+    }
+
+    pub fn isValidOtelHeaderValue(raw: []const u8) bool {
+        return isValidHttpHeaderValue(raw);
+    }
 };
+
+fn isValidHttpsOrLocalHttpUrl(raw: []const u8) bool {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return false;
+    if (std.mem.indexOfAny(u8, trimmed, " \t\r\n") != null) return false;
+
+    const uri = std.Uri.parse(trimmed) catch return false;
+    const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+    const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
+    if (!is_https and !is_http) return false;
+
+    const host_comp = uri.host orelse return false;
+    const host = switch (host_comp) {
+        .raw => |h| h,
+        .percent_encoded => |h| blk: {
+            if (std.mem.indexOfScalar(u8, h, '%') != null) return false;
+            break :blk h;
+        },
+    };
+    if (host.len == 0) return false;
+    if (std.mem.indexOfAny(u8, host, " \t\r\n") != null) return false;
+    if (host[0] == ':') return false;
+
+    if (is_http and !net_security.isLocalHost(host)) return false;
+
+    if (host[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, host, ']') orelse return false;
+        if (close != host.len - 1) return false;
+    }
+
+    if (std.mem.indexOfScalar(u8, trimmed, '#') != null) return false;
+    if (uri.port) |port| if (port == 0) return false;
+    return true;
+}
+
+fn isValidHttpHeaderName(raw: []const u8) bool {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return false;
+    for (trimmed) |ch| {
+        // RFC 7230 token subset; keep strict to prevent header injection.
+        if (ch <= 0x20 or ch >= 0x7f) return false;
+        if (ch == ':' or ch == '"' or ch == '\\') return false;
+    }
+    return true;
+}
+
+fn isValidHttpHeaderValue(raw: []const u8) bool {
+    if (std.mem.indexOfAny(u8, raw, "\r\n") != null) return false;
+    return true;
+}
 
 pub const AutonomyConfig = struct {
     level: AutonomyLevel = .supervised,
@@ -360,6 +418,23 @@ pub const AgentConfig = struct {
     }
 };
 
+pub const ToolCustomization = struct {
+    /// Tool name (e.g., "screenshot", "file_read", "shell")
+    name: []const u8,
+    /// Custom system prompt for this tool.
+    /// If provided, this will override the default tool description.
+    system_prompt: ?[]const u8 = null,
+    /// Trigger keywords for this tool.
+    /// When user message contains any of these keywords,
+    /// the tool will be prioritized.
+    triggers: []const []const u8 = &.{},
+    /// Priority level (higher = more important).
+    /// Default is 0.
+    priority: u8 = 0,
+    /// Whether this tool is enabled.
+    enabled: bool = true,
+};
+
 pub const ToolsConfig = struct {
     shell_timeout_secs: u64 = 60,
     shell_max_output_bytes: u32 = 1_048_576, // 1MB
@@ -373,6 +448,15 @@ pub const ToolsConfig = struct {
     ///
     /// Example: ["LD_LIBRARY_PATH", "PYTHONHOME", "NODE_PATH"]
     path_env_vars: []const []const u8 = &.{},
+    /// Tool customization configuration.
+    /// Allows customizing system prompts, trigger keywords, and priorities for individual tools.
+    tool_customizations: []const ToolCustomization = &.{},
+    /// Optional path to external JSON file containing tool customizations.
+    tool_customizations_file: ?[]const u8 = null,
+    /// Custom modifiers to remove from user input when checking for exact trigger matches.
+    trigger_modifiers: []const []const u8 = &.{},
+    /// Custom punctuation characters to remove when checking for exact trigger matches.
+    trigger_punctuation: []const u8 = "",
 };
 
 pub const ModelRouteCostClass = enum {
@@ -547,6 +631,10 @@ pub const TeamsConfig = struct {
     notification_channel_id: ?[]const u8 = null,
     bot_id: ?[]const u8 = null,
     config_dir: []const u8 = ".",
+
+    pub fn isValidWebhookSecret(raw: []const u8) bool {
+        return WebConfig.isValidAuthToken(raw);
+    }
 };
 
 pub const WebhookConfig = struct {
@@ -574,6 +662,11 @@ pub const MatrixConfig = struct {
     dm_policy: []const u8 = "allowlist",
     group_policy: []const u8 = "allowlist",
     require_mention: bool = false,
+    /// Optional pantalaimon E2EE proxy URL (e.g. "http://localhost:8008").
+    /// When set, all Matrix API requests are routed through the proxy instead
+    /// of directly to the homeserver. The homeserver field is still required
+    /// for display and onboarding purposes.
+    pantalaimon_proxy_url: ?[]const u8 = null,
 };
 
 pub const MattermostConfig = struct {
@@ -1734,54 +1827,15 @@ pub const McpServerConfig = struct {
     }
 
     pub fn isValidHttpUrl(raw: []const u8) bool {
-        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-        if (trimmed.len == 0) return false;
-        if (std.mem.indexOfAny(u8, trimmed, " \t\r\n") != null) return false;
-
-        const uri = std.Uri.parse(trimmed) catch return false;
-        const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
-        const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
-        if (!is_https and !is_http) return false;
-
-        const host_comp = uri.host orelse return false;
-        const host = switch (host_comp) {
-            .raw => |h| h,
-            .percent_encoded => |h| blk: {
-                if (std.mem.indexOfScalar(u8, h, '%') != null) return false;
-                break :blk h;
-            },
-        };
-        if (host.len == 0) return false;
-        if (std.mem.indexOfAny(u8, host, " \t\r\n") != null) return false;
-        if (host[0] == ':') return false;
-
-        // Keep MCP local-http exceptions aligned with shared host safety rules.
-        if (is_http and !net_security.isLocalHost(host)) return false;
-
-        if (host[0] == '[') {
-            const close = std.mem.indexOfScalar(u8, host, ']') orelse return false;
-            if (close != host.len - 1) return false;
-        }
-
-        if (std.mem.indexOfScalar(u8, trimmed, '#') != null) return false;
-        if (uri.port) |port| if (port == 0) return false;
-        return true;
+        return isValidHttpsOrLocalHttpUrl(raw);
     }
 
     pub fn isValidHeaderName(raw: []const u8) bool {
-        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-        if (trimmed.len == 0) return false;
-        for (trimmed) |ch| {
-            // RFC 7230 token subset; keep strict to prevent header injection.
-            if (ch <= 0x20 or ch >= 0x7f) return false;
-            if (ch == ':' or ch == '"' or ch == '\\') return false;
-        }
-        return true;
+        return isValidHttpHeaderName(raw);
     }
 
     pub fn isValidHeaderValue(raw: []const u8) bool {
-        if (std.mem.indexOfAny(u8, raw, "\r\n") != null) return false;
-        return true;
+        return isValidHttpHeaderValue(raw);
     }
 };
 
@@ -2095,6 +2149,19 @@ test "HttpRequestConfig fallback provider validation disallows auto" {
     try std.testing.expect(HttpRequestConfig.isValidSearchFallbackProviderName("JINA"));
     try std.testing.expect(!HttpRequestConfig.isValidSearchFallbackProviderName("auto"));
     try std.testing.expect(!HttpRequestConfig.isValidSearchFallbackProviderName("AUTO"));
+}
+
+test "DiagnosticsConfig OTEL endpoint validation allows local http and remote https" {
+    try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://localhost:4318"));
+    try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("http://127.0.0.1:4318"));
+    try std.testing.expect(DiagnosticsConfig.isValidOtelEndpoint("https://otel.example.com:4318"));
+    try std.testing.expect(!DiagnosticsConfig.isValidOtelEndpoint("http://otel.example.com:4318"));
+}
+
+test "DiagnosticsConfig OTEL header validation rejects CRLF injection" {
+    try std.testing.expect(DiagnosticsConfig.isValidOtelHeaderName("Authorization"));
+    try std.testing.expect(DiagnosticsConfig.isValidOtelHeaderValue("Bearer safe"));
+    try std.testing.expect(!DiagnosticsConfig.isValidOtelHeaderValue("Bearer safe\r\nX-Injected: yes"));
 }
 
 test "ProviderEntry.max_streaming_prompt_bytes defaults to null" {
