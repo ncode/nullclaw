@@ -384,25 +384,35 @@ fn downloadToFile(allocator: std.mem.Allocator, url: []const u8, file: *std_comp
     }
     if (!std.mem.startsWith(u8, url, "https://")) return error.HttpFailed;
 
-    const result = http_util.nativeHttpRequest(allocator, .{
+    const WriteCtx = struct {
+        file: *std_compat.fs.File,
+        total: usize = 0,
+
+        fn write(ctx: *anyopaque, chunk: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.file.writeAll(chunk) catch |err| {
+                logDownloadToFileError("download write failed: {}", .{err});
+                return err;
+            };
+            self.total += chunk.len;
+        }
+    };
+
+    var write_ctx = WriteCtx{ .file = file };
+    const result = http_util.nativeHttpStreamRequest(allocator, .{
         .method = .GET,
         .url = url,
         .timeout_secs = 60,
         .max_response_bytes = 128 * 1024 * 1024,
         .fail_on_http_error = true,
         .follow_redirects = true,
-    }) catch |err| {
+    }, @ptrCast(&write_ctx), WriteCtx.write) catch |err| {
         logDownloadToFileError("download failed: {}", .{err});
         return error.HttpFailed;
     };
     defer result.deinit(allocator);
 
-    file.writeAll(result.body) catch |err| {
-        logDownloadToFileError("download write failed: {}", .{err});
-        return err;
-    };
-
-    return result.body.len;
+    return write_ctx.total;
 }
 
 fn atomicReplace(tmp_path: []const u8, exe_path: []const u8) !void {
@@ -547,4 +557,39 @@ test "downloadToFile streams from local file URL" {
     const content = try dst_file.readToEndAlloc(allocator, payload.len + 1);
     defer allocator.free(content);
     try std.testing.expectEqualStrings(payload, content);
+}
+
+test "downloadToFile streams native HTTPS body to file" {
+    const allocator = std.testing.allocator;
+    const handler = struct {
+        fn handle(alloc: std.mem.Allocator, request: http_util.NativeHttpRequest) anyerror!http_util.NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.GET, request.method);
+            try std.testing.expectEqualStrings("https://downloads.example.test/nullclaw.tar.gz", request.url);
+            try std.testing.expect(request.fail_on_http_error);
+            try std.testing.expect(request.follow_redirects);
+            try std.testing.expect(request.max_response_bytes >= 128 * 1024 * 1024);
+            return .{ .status_code = 200, .body = try alloc.dupe(u8, "release-bytes") };
+        }
+    }.handle;
+
+    http_util.setTestNativeHttpHandler(handler);
+    defer http_util.setTestNativeHttpHandler(null);
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var dst = try @import("compat").fs.Dir.wrap(tmp_dir.dir).createFile("download.bin", .{ .read = true });
+    defer dst.close();
+
+    const bytes_downloaded = try downloadToFile(
+        allocator,
+        "https://downloads.example.test/nullclaw.tar.gz",
+        &dst,
+    );
+    try std.testing.expectEqual(@as(usize, "release-bytes".len), bytes_downloaded);
+
+    try dst.seekTo(0);
+    var buf: [32]u8 = undefined;
+    const n = try dst.read(&buf);
+    try std.testing.expectEqualStrings("release-bytes", buf[0..n]);
 }

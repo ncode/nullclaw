@@ -65,7 +65,18 @@ pub const NativeHttpResponse = struct {
     }
 };
 
+pub const NativeHttpStreamResponse = struct {
+    status_code: u16,
+    headers: []u8 = &.{},
+    bytes_read: usize,
+
+    pub fn deinit(self: NativeHttpStreamResponse, allocator: Allocator) void {
+        if (self.headers.len > 0) allocator.free(self.headers);
+    }
+};
+
 pub const NativeHttpHandler = *const fn (Allocator, NativeHttpRequest) anyerror!NativeHttpResponse;
+pub const NativeHttpChunkHandler = *const fn (ctx: *anyopaque, chunk: []const u8) anyerror!void;
 
 threadlocal var test_native_http_handler: ?NativeHttpHandler = null;
 
@@ -488,6 +499,41 @@ fn readResponseBody(
     return body.toOwnedSlice(allocator);
 }
 
+fn readResponseBodyStreaming(
+    client: *std.http.Client,
+    response: *std.http.Client.Response,
+    max_response_bytes: usize,
+    deadline_ns: ?i128,
+    ctx: *anyopaque,
+    chunk_handler: NativeHttpChunkHandler,
+) !usize {
+    const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+        .identity => &.{},
+        .zstd => try client.allocator.alloc(u8, std.compress.zstd.default_window_len),
+        .deflate, .gzip => try client.allocator.alloc(u8, std.compress.flate.max_window_len),
+        .compress => return error.HttpReadError,
+    };
+    defer if (response.head.content_encoding != .identity) client.allocator.free(decompress_buffer);
+
+    var transfer_buffer: [64]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+
+    var chunk: [8192]u8 = undefined;
+    var bytes_read: usize = 0;
+    while (true) {
+        try checkInterrupted();
+        try checkDeadline(deadline_ns);
+        const n = reader.readSliceShort(&chunk) catch return error.HttpReadError;
+        if (n == 0) break;
+        if (n > max_response_bytes - bytes_read) return error.HttpReadError;
+        try chunk_handler(ctx, chunk[0..n]);
+        bytes_read += n;
+    }
+
+    return bytes_read;
+}
+
 fn writeRequestPayloadFromFile(
     request: *std.http.Client.Request,
     file_path: []const u8,
@@ -623,6 +669,110 @@ fn runNativeHttpRequest(allocator: Allocator, request: NativeHttpRequest) !Nativ
 
 pub fn nativeHttpRequest(allocator: Allocator, request: NativeHttpRequest) !NativeHttpResponse {
     return runNativeHttpRequest(allocator, request);
+}
+
+fn runNativeHttpStreamRequest(
+    allocator: Allocator,
+    request: NativeHttpRequest,
+    ctx: *anyopaque,
+    chunk_handler: NativeHttpChunkHandler,
+) !NativeHttpStreamResponse {
+    try checkInterrupted();
+    const deadline_ns = deadlineFromTimeoutSeconds(request.timeout_secs);
+
+    if (builtin.is_test) {
+        if (test_native_http_handler) |handler| {
+            const response = try handler(allocator, request);
+            errdefer response.deinit(allocator);
+
+            if (request.fail_on_http_error and response.status_code >= 400) {
+                return error.HttpFailed;
+            }
+            if (response.body.len > request.max_response_bytes) {
+                return error.HttpReadError;
+            }
+            if (response.body.len > 0) try chunk_handler(ctx, response.body);
+
+            const headers = response.headers;
+            const bytes_read = response.body.len;
+            allocator.free(response.body);
+            return .{
+                .status_code = response.status_code,
+                .headers = headers,
+                .bytes_read = bytes_read,
+            };
+        }
+    }
+
+    try checkInterrupted();
+    var client = try initClientWithOptionalProxy(allocator, request.proxy);
+    defer client.deinit();
+
+    const uri = std.Uri.parse(request.url) catch return error.HttpFailed;
+    try checkInterrupted();
+    const connection = requestConnectionForResolve(&client.client, uri, request.resolve_entry, request.proxy) catch |err|
+        return mapNativeHttpError(err);
+
+    var redirect_buffer: [8192]u8 = undefined;
+    const redirect_behavior: std.http.Client.Request.RedirectBehavior = if (request.follow_redirects and request.payload == null)
+        std.http.Client.Request.RedirectBehavior.init(3)
+    else
+        .unhandled;
+
+    var req = client.client.request(request.method, uri, .{
+        .extra_headers = request.headers,
+        .redirect_behavior = redirect_behavior,
+        .connection = connection,
+        .keep_alive = false,
+    }) catch |err| return mapNativeHttpError(err);
+    defer req.deinit();
+    applyConnectionSocketTimeout(req.connection, request.timeout_secs);
+
+    try checkInterrupted();
+    try checkDeadline(deadline_ns);
+    try writeRequestPayload(&req, request.payload, request.payload_file_path, deadline_ns);
+
+    try checkInterrupted();
+    try checkDeadline(deadline_ns);
+    var response = req.receiveHead(if (redirect_behavior == .unhandled) &.{} else &redirect_buffer) catch |err|
+        return mapNativeHttpError(err);
+    const status_code: u16 = @intFromEnum(response.head.status);
+
+    if (request.fail_on_http_error and status_code >= 400) {
+        return error.HttpFailed;
+    }
+
+    const headers = if (request.include_response_headers)
+        try appendResponseHeaders(allocator, response.head)
+    else
+        try allocator.dupe(u8, "");
+    errdefer allocator.free(headers);
+
+    const bytes_read = readResponseBodyStreaming(
+        &client.client,
+        &response,
+        request.max_response_bytes,
+        deadline_ns,
+        ctx,
+        chunk_handler,
+    ) catch |err| return mapNativeHttpError(err);
+    try checkInterrupted();
+    try checkDeadline(deadline_ns);
+
+    return .{
+        .status_code = status_code,
+        .headers = headers,
+        .bytes_read = bytes_read,
+    };
+}
+
+pub fn nativeHttpStreamRequest(
+    allocator: Allocator,
+    request: NativeHttpRequest,
+    ctx: *anyopaque,
+    chunk_handler: NativeHttpChunkHandler,
+) !NativeHttpStreamResponse {
+    return runNativeHttpStreamRequest(allocator, request, ctx, chunk_handler);
 }
 
 /// HTTP POST with optional proxy and timeout.
@@ -1023,10 +1173,20 @@ fn putProxyEnvVarFromProcess(
 ) !void {
     if (std_compat.process.getEnvVarOwned(allocator, key)) |raw_value| {
         defer allocator.free(raw_value);
-        if (try normalizeProxyEnvValue(allocator, raw_value)) |proxy| {
-            try env_map.put(key, proxy);
-        }
+        try putProxyEnvVarValue(env_map, allocator, key, raw_value);
     } else |_| {}
+}
+
+fn putProxyEnvVarValue(
+    env_map: *std_compat.process.EnvMap,
+    allocator: Allocator,
+    key: []const u8,
+    raw_value: []const u8,
+) !void {
+    if (try normalizeProxyEnvValue(allocator, raw_value)) |proxy| {
+        defer allocator.free(proxy);
+        try env_map.put(key, proxy);
+    }
 }
 
 fn buildProxyEnvMapFromProcess(allocator: Allocator) !std_compat.process.EnvMap {
@@ -1336,6 +1496,50 @@ test "native migration preserves sse get helper semantics" {
     try std.testing.expectEqualStrings("data: ok\n\n", body);
 }
 
+test "native stream request forwards body chunks without retaining response body" {
+    const allocator = std.testing.allocator;
+    const handler = struct {
+        fn handle(alloc: Allocator, request: NativeHttpRequest) anyerror!NativeHttpResponse {
+            try std.testing.expectEqual(std.http.Method.GET, request.method);
+            try std.testing.expect(request.include_response_headers);
+            return .{
+                .status_code = 200,
+                .headers = try alloc.dupe(u8, "HTTP/1.1 200 OK\r\ncontent-length: 6"),
+                .body = try alloc.dupe(u8, "stream"),
+            };
+        }
+    }.handle;
+
+    const Capture = struct {
+        allocator: Allocator,
+        body: std.ArrayListUnmanaged(u8) = .empty,
+
+        fn onChunk(ctx: *anyopaque, chunk: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            try self.body.appendSlice(self.allocator, chunk);
+        }
+    };
+
+    setTestNativeHttpHandler(handler);
+    defer setTestNativeHttpHandler(null);
+
+    var capture = Capture{ .allocator = allocator };
+    defer capture.body.deinit(allocator);
+
+    const response = try nativeHttpStreamRequest(allocator, .{
+        .method = .GET,
+        .url = "https://api.example.test/stream",
+        .max_response_bytes = 16,
+        .include_response_headers = true,
+    }, @ptrCast(&capture), Capture.onChunk);
+    defer response.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 200), response.status_code);
+    try std.testing.expectEqual(@as(usize, 6), response.bytes_read);
+    try std.testing.expect(std.mem.indexOf(u8, response.headers, "content-length") != null);
+    try std.testing.expectEqualStrings("stream", capture.body.items);
+}
+
 test "native migration converts request timeout to socket timeval" {
     const tv = socketTimeoutForSeconds(2);
     try std.testing.expectEqual(@as(@TypeOf(tv.sec), 2), tv.sec);
@@ -1445,6 +1649,17 @@ test "applyProxyOverrideToEnvMap overwrites existing proxy values" {
     try std.testing.expect(try applyProxyOverrideToEnvMap(&env_map));
     try std.testing.expectEqualStrings("socks5://override.example:1080", env_map.get("HTTPS_PROXY").?);
     try std.testing.expectEqualStrings("socks5://override.example:1080", env_map.get("http_proxy").?);
+}
+
+test "putProxyEnvVarValue copies trimmed proxy into env map" {
+    var env_map = std_compat.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+
+    // Regression: the temporary normalized proxy allocation must not be leaked;
+    // EnvMap keeps its own copy after putProxyEnvVarValue returns.
+    try putProxyEnvVarValue(&env_map, std.testing.allocator, "HTTPS_PROXY", "  https://proxy.example:8443  ");
+
+    try std.testing.expectEqualStrings("https://proxy.example:8443", env_map.get("HTTPS_PROXY").?);
 }
 
 test "initClientDefaultProxiesFromEnvMap parses proxy settings" {
