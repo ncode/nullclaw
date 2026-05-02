@@ -590,7 +590,7 @@ fn installLinuxSysvinit(allocator: std.mem.Allocator) !void {
     try file.writeAll(script);
     try file.chmod(0o755);
 
-    sysvinitUpdateChecked(allocator, &.{ "nullclaw", "defaults" }) catch |err| switch (err) {
+    sysvinitUpdateChecked(allocator, &.{ "nullclaw", "defaults", "95" }) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
@@ -996,6 +996,9 @@ fn buildOpenRcScript(allocator: std.mem.Allocator, cfg: OpenRcScriptConfig) ![]u
         \\export HOME={s}
         \\export NULLCLAW_HOME={s}
         \\{s}
+        \\respawn
+        \\respawn_delay=3
+        \\
         \\depend() {{
         \\    need net
         \\}}
@@ -1034,8 +1037,9 @@ fn buildSysvinitScript(allocator: std.mem.Allocator, cfg: SysvinitScriptConfig) 
         \\#!/bin/sh
         \\### BEGIN INIT INFO
         \\# Provides:          nullclaw
-        \\# Required-Start:    $network $remote_fs
+        \\# Required-Start:    $network $remote_fs $syslog
         \\# Required-Stop:     $network $remote_fs
+        \\# Should-Start:      ntp ntpsec
         \\# Default-Start:     2 3 4 5
         \\# Default-Stop:      0 1 6
         \\# Description:       nullclaw gateway runtime
@@ -1048,6 +1052,7 @@ fn buildSysvinitScript(allocator: std.mem.Allocator, cfg: SysvinitScriptConfig) 
         \\NULLCLAW_HOME={s}
         \\PIDFILE={s}
         \\LOGFILE={s}
+        \\RESPAWN_DELAY=3
         \\
         \\case "$1" in
         \\  start)
@@ -1055,7 +1060,7 @@ fn buildSysvinitScript(allocator: std.mem.Allocator, cfg: SysvinitScriptConfig) 
         \\    export HOME="$SERVICE_HOME"
         \\    export NULLCLAW_HOME="$NULLCLAW_HOME"
         \\{s}
-        \\    {s} --start --background --make-pidfile --pidfile "$PIDFILE"{s} --chdir "$SERVICE_HOME" --startas /bin/sh -- -c "exec \\"$DAEMON\\" gateway >> \\"$LOGFILE\\" 2>&1"
+        \\    {s} --start --background --make-pidfile --pidfile "$PIDFILE"{s} --chdir "$SERVICE_HOME" --startas /bin/sh -- -c "trap 'if [ -n \"\${{child:-}}\" ]; then kill \"\$child\" 2>/dev/null; fi; exit 0' TERM INT; while true; do \"$DAEMON\" gateway >> \"$LOGFILE\" 2>&1 & child=\$!; wait \"\$child\"; status=\$?; child=; if [ \"\$status\" -eq 0 ]; then exit 0; fi; sleep $RESPAWN_DELAY; done"
         \\    ;;
         \\  stop)
         \\    echo "Stopping nullclaw..."
@@ -1598,6 +1603,12 @@ test "buildOpenRcScript includes user and config env" {
     try std.testing.expect(std.mem.indexOf(u8, script, "command_user=\"alice\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "export HOME=\"/home/alice\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "export NULLCLAW_HOME=\"/home/alice/.nullclaw\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "respawn") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "respawn_delay=3") != null);
+    // Regression: OpenRC env injection belongs in service-launch.sh/service-env,
+    // not a root-run start_pre hook.
+    try std.testing.expect(std.mem.indexOf(u8, script, "start_pre()") == null);
+    try std.testing.expect(std.mem.indexOf(u8, script, ".env") == null);
 }
 
 test "buildSysvinitScript includes user and config env" {
@@ -1618,6 +1629,18 @@ test "buildSysvinitScript includes user and config env" {
     try std.testing.expect(std.mem.indexOf(u8, script, "--startas /bin/sh -- -c") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "$DAEMON") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "$LOGFILE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "# Required-Start:    $network $remote_fs $syslog") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "# Should-Start:      ntp ntpsec") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "RESPAWN_DELAY=3") != null);
+    // Regression: RTC-less SysVinit hosts should recover by respawning failed
+    // gateway processes without blocking boot on a provider-specific HTTPS probe.
+    try std.testing.expect(std.mem.indexOf(u8, script, "trap 'if [ -n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "while true; do") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "child=\\$!") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "wait \\\"\\$child\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "sleep $RESPAWN_DELAY") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "ENVFILE=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "openrouter.ai") == null);
 }
 
 test "openRcServiceState classifies common states" {
