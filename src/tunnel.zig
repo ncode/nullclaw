@@ -1,7 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat");
 const builtin = @import("builtin");
-const platform = @import("platform.zig");
 
 // Tunnel -- ngrok/cloudflare/tailscale/custom tunnel management.
 //
@@ -239,56 +238,19 @@ fn cleanupFailedStart(child: *?std_compat.process.Child, state: *TunnelState) vo
     state.* = .error_state;
 }
 
-const tailscale_inherit_env_vars = [_][]const u8{
-    "PATH",              "HOME",        "TERM",    "LANG",         "LC_ALL",
-    "LC_CTYPE",          "USER",        "SHELL",   "TMPDIR",       "NODE_PATH",
-    "NPM_CONFIG_PREFIX",
-    // Windows-specific
-    "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP",
-    "TMP",               "SYSTEMROOT",  "COMSPEC", "PROGRAMFILES", "WINDIR",
-};
-
 const TailscaleAuthError = error{
     InvalidAuthKey,
     AuthenticationFailed,
     ProcessSpawnFailed,
-} || std.mem.Allocator.Error;
-
-fn buildTailscaleAuthEnvMap(
-    allocator: std.mem.Allocator,
-    auth_key: []const u8,
-) TailscaleAuthError!std_compat.process.EnvMap {
-    var env = std_compat.process.EnvMap.init(allocator);
-    errdefer env.deinit();
-
-    for (&tailscale_inherit_env_vars) |key| {
-        if (platform.getEnvOrNull(allocator, key)) |value| {
-            defer allocator.free(value);
-            try env.put(key, value);
-        }
-    }
-    try env.put("TS_AUTH_KEY", auth_key);
-    return env;
-}
-
-fn tailscaleAuthCommand() []const u8 {
-    return if (comptime builtin.os.tag == .windows)
-        "tailscale up --auth-key=%TS_AUTH_KEY%"
-    else
-        "exec tailscale up --auth-key=\"$TS_AUTH_KEY\"";
-}
+};
 
 fn runTailscaleAuth(allocator: std.mem.Allocator, auth_key: []const u8) TailscaleAuthError!void {
     if (std.mem.trim(u8, auth_key, " \t\r\n").len == 0) return error.InvalidAuthKey;
 
-    var env = try buildTailscaleAuthEnvMap(allocator, auth_key);
-    defer env.deinit();
-
     var child = std_compat.process.Child.init(
-        &.{ platform.getShell(), platform.getShellFlag(), tailscaleAuthCommand() },
+        &.{ "tailscale", "up", "--auth-key", auth_key },
         allocator,
     );
-    child.env_map = &env;
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
@@ -573,7 +535,6 @@ pub const TailscaleTunnel = struct {
                 return switch (err) {
                     error.InvalidAuthKey, error.AuthenticationFailed => TunnelAdapter.TunnelError.AuthenticationFailed,
                     error.ProcessSpawnFailed => TunnelAdapter.TunnelError.ProcessSpawnFailed,
-                    else => TunnelAdapter.TunnelError.StartFailed,
                 };
             };
         }
@@ -905,7 +866,6 @@ pub const Tunnel = struct {
                         return switch (err) {
                             error.InvalidAuthKey, error.AuthenticationFailed => error.AuthenticationFailed,
                             error.ProcessSpawnFailed => error.NotImplemented,
-                            else => error.NotImplemented,
                         };
                     };
                 }
